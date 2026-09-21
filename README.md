@@ -285,7 +285,10 @@ Opcja miejsca „wszystkie zaznaczone drzwi razem” pozwala wejść jednymi drz
 
 ## Obsługiwane modele
 
-Model rozpoznawany jest po liczbie niezależnych drzwi/przekaźników:
+Model rozpoznawany jest po liczbie niezależnych drzwi/przekaźników. Liczbę drzwi panel odczytuje
+dopiero po zalogowaniu się do kontrolera. Kontroler z loginem i hasłem innym niż podane i fabryczne
+skan pokazuje jako „nieznany - podaj login i hasło kontrolera”. Nie jest to nieobsługiwany model:
+wystarczy połączyć się z nim, podając jego dane logowania.
 
 | Model | Drzwi | Status profilu |
 |---|---|---|

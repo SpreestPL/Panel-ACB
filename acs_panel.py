@@ -74,7 +74,7 @@ from urllib.parse import urlparse, parse_qs, urlencode
 import http.client
 
 
-APP_VERSION = "2.6.0"
+APP_VERSION = "2.6.1"
 
 # Tryb pracy panelu (ACS_MODE):
 #   online  - panel jest stale połączony z kontrolerem i pracuje w tle: przełącza PIN-y kart przy kilku
@@ -1697,7 +1697,8 @@ def _probe_locked(ip, user, pwd):
         except Exception:
             continue
     else:
-        entry["model"] = "nieznany (wymaga logowania)"
+        # model wychodzi dopiero po zalogowaniu - kontroler ma login/hasło inne niż podane i fabryczne
+        entry["model"] = "nieznany - podaj login i hasło kontrolera"
     return entry
 
 
@@ -1729,6 +1730,8 @@ def discover(subnet=None, user=DEF_USER, pwd=DEF_PWD, workers=64):
             e = {"host": u["ip"], "is_controller": True, "model": "?", "doors": 0, "verified": False,
                  "login": "", "device_no": u["device_no"], "driver": "", "login_ok": False}
             found.append(e)
+        # bez logowania numer urządzenia zna tylko UDP - bez niego „Ustaw adres IP” nie ma czego wysłać
+        e["device_no"] = e["device_no"] or u["device_no"]
         e["udp"] = u
         e["reachable"] = u["reachable"] and (e.get("login_ok") or e["host"] in by_ip)
     found.sort(key=lambda e: (not e.get("reachable", True), tuple(int(x) for x in e["host"].split("."))))
