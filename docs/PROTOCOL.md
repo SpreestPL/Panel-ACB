@@ -91,6 +91,10 @@ tłumaczenia z ZH, więc panel sprowadza oba do jednej postaci:
 | `Forbid IN[#1DOOR]` | `禁止 进门[#1号门]` | `Denied IN[#1 Door]` |
 | `Remote Open Door IN[#2DOOR]` | `远程开门 进门[#2号门]` | `Remote Open IN[#2 Door]` |
 
+Wpis `Remote Open` ma w kolumnie karty **adres IP, z którego przyszło otwarcie** zapisany jako liczba
+(192.168.0.4 → `3232235524`), a nie numer karty. Panel zapisuje go w kopii logu z pustą kartą (od 2.7.1) —
+inaczej pulpit pokazywał go w „Teraz w środku”, a czas pracy liczył jako pracownika.
+
 **Przełączanie języka** (formularz `E17`, radio `20`: `1`=Chinese, `2`=English, zapis `S17`)
 działa od razu, bez restartu; odpowiedź na zapis to strona Configure już w nowym języku.
 Rozpoznanie języka: tytuł `网络门禁` na dowolnej stronie. Panel przy połączeniu

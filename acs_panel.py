@@ -74,7 +74,7 @@ from urllib.parse import urlparse, parse_qs, urlencode
 import http.client
 
 
-APP_VERSION = "2.7.0"
+APP_VERSION = "2.7.1"
 
 # Tryb pracy panelu (ACS_MODE):
 #   online  - panel jest stale połączony z kontrolerem i pracuje w tle: przełącza PIN-y kart przy kilku
@@ -2476,6 +2476,10 @@ def _db_migrate(con):
         con.execute("UPDATE swipes SET reason = (SELECT l.reason FROM live_events l WHERE l.ctrl = swipes.ctrl "
                     "AND l.record = swipes.record AND l.time = swipes.time) WHERE granted = 0 AND card <> ''")
         con.execute("PRAGMA user_version = 4")
+    if con.execute("PRAGMA user_version").fetchone()[0] < 5:
+        # 2.7.1: „Remote Open” ma w polu karty adres IP otwierającego - pulpit liczył go jako osobę w środku
+        con.execute("UPDATE swipes SET card = '' WHERE status LIKE 'Remote Open%'")
+        con.execute("PRAGMA user_version = 5")
 
 
 # -- ustawienia panelu (JSON w tabeli settings) --
@@ -3693,6 +3697,12 @@ _SYNC = {}                  # ctrl_key -> stan pobierania
 _SYNC_LOCK = threading.Lock()
 
 
+def swipe_card(r):
+    """Numer karty wpisu logu. Przy „Remote Open” kontroler wpisuje w pole karty adres IP, z którego
+    przyszło otwarcie (192.168.0.4 -> 3232235524) - to nie karta, więc zapisujemy pustą."""
+    return "" if r["status"].startswith("Remote Open") else card_key(r["card"])
+
+
 def _store_swipes(key, rows):
     with db() as con:
         r = con.execute("SELECT cleared_to FROM sync_state WHERE ctrl = ?", (key,)).fetchone()
@@ -3703,7 +3713,7 @@ def _store_swipes(key, rows):
         con.executemany(
             "INSERT OR IGNORE INTO swipes(ctrl, record, time, card, name, door, reader, granted, status) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [(key, int(r["record"]), r["time"], card_key(r["card"]), r["name"], r["door"],
+            [(key, int(r["record"]), r["time"], swipe_card(r), r["name"], r["door"],
               r["reader"], int(r["granted"]), r["status"]) for r in rows])
         return con.total_changes - before
 
