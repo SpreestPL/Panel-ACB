@@ -2,7 +2,7 @@
 
 Uniwersalny program do wyszukiwania i obsługi sieciowych kontrolerów dostępu
 rodziny **ACB** (kontrolery Wiegand z wbudowanym web-serwerem „Web Controller",
-komunikacja po HTTP/TCP-IP).
+komunikacja po HTTP/TCP-IP) oferowanych przez Spreest.
 
 Program działa jako lokalny serwer-pośrednik: udostępnia czysty interfejs WWW
 i tłumaczy kliknięcia na natywne zapytania kontrolera (`ACT_ID_*`). Dzięki temu
