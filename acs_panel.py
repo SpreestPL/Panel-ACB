@@ -74,7 +74,7 @@ from urllib.parse import urlparse, parse_qs, urlencode
 import http.client
 
 
-APP_VERSION = "2.6.1"
+APP_VERSION = "2.6.2"
 
 # Tryb pracy panelu (ACS_MODE):
 #   online  - panel jest stale połączony z kontrolerem i pracuje w tle: przełącza PIN-y kart przy kilku
@@ -1822,16 +1822,15 @@ def _free_ip(ip):
     return True
 
 
-def wg_set_ip(device_no, ip, mask="255.255.255.0", gateway=""):
-    """Nowy adres kontrolera znalezionego wyszukiwaniem UDP (działa także, gdy jego obecny adres jest
-    spoza naszej podsieci). Po zmianie: poprawia adres na liście zapisanych i rozłącza stare połączenie."""
+def _check_new_ip(ip, mask, gateway):
+    """Wspólne sprawdzenie nowego adresu kontrolera: poprawny adres w sieci tego komputera (inaczej panel
+    straciłby z nim kontakt), brama w tej samej sieci. Zwraca (adres, sieć, brama albo None)."""
     try:
-        dev = int(device_no)
         addr = ipaddress.ip_address(ip)
         net = ipaddress.ip_network(f"{ip}/{mask}", strict=False)
-        gw = ipaddress.ip_address(gateway) if gateway else None
+        gw = ipaddress.ip_address(gateway) if gateway and gateway != "0.0.0.0" else None
     except ValueError:
-        raise ControllerError("Podaj poprawny numer urządzenia, adres IP, maskę i bramę")
+        raise ControllerError("Podaj poprawny adres IP, maskę i bramę")
     if addr.version != 4 or net.prefixlen < 8 or net.prefixlen > 30:
         raise ControllerError("Maska musi być w zakresie 255.0.0.0 - 255.255.255.252")
     if addr in (net.network_address, net.broadcast_address):
@@ -1844,7 +1843,18 @@ def wg_set_ip(device_no, ip, mask="255.255.255.0", gateway=""):
         raise ControllerError(f"{ip} to adres komputera z panelem")
     if not any(ipaddress.ip_address(x) in net for x in local):
         raise ControllerError(f"Adres {ip} jest spoza sieci tego komputera ({', '.join(local)}) - "
-                              "panel nadal nie widziałby kontrolera")
+                              "panel nie widziałby kontrolera")
+    return addr, net, gw
+
+
+def wg_set_ip(device_no, ip, mask="255.255.255.0", gateway=""):
+    """Nowy adres kontrolera znalezionego wyszukiwaniem UDP (działa także, gdy jego obecny adres jest
+    spoza naszej podsieci). Po zmianie: poprawia adres na liście zapisanych i rozłącza stare połączenie."""
+    try:
+        dev = int(device_no)
+    except ValueError:
+        raise ControllerError("Podaj poprawny numer urządzenia")
+    addr, net, gw = _check_new_ip(ip, mask, gateway)
     now = {e["device_no"]: e for e in wg_search(1.5)}
     cur = now.get(str(dev))
     if cur is None:
@@ -2218,6 +2228,14 @@ def factory_reset_active():
 
 def set_network_active(ip, gateway):
     old = require_active()
+    ip, gateway = (ip or "").strip(), (gateway or "").strip()
+    # formularz WWW kontrolera nie zmienia maski - nowy adres sprawdzamy z obecną
+    mask = old.info.get("mask") or ""
+    if not re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", mask):
+        mask = "255.255.255.0"
+    _check_new_ip(ip, mask, gateway)
+    if ip != old.host and not _free_ip(ip):
+        raise ControllerError(f"Adres {ip} jest zajęty przez inne urządzenie - wybierz inny")
     r = old.set_network(ip, gateway)
     _saved_follow_active(old, host=ip)
     c = old
@@ -7016,7 +7034,10 @@ tr.past td{opacity:.55}
     </div>
     <div class="card danger">
       <h2>Parametry sieciowe</h2>
-      <div class="note warn" style="margin-top:12px">Zmiana adresu IP odetnie ten panel. Po zapisaniu połącz się ponownie z nowym adresem.</div>
+      <div class="note warn" style="margin-top:12px">Po zapisaniu kontroler zrestartuje się (ok. minuty). <b>Możesz zostać na tej stronie</b> -
+        panel sam połączy się z kontrolerem pod nowym adresem, a do tego czasu status może pokazywać błąd połączenia.
+        Jeśli kontroler jest na liście zapisanych kontrolerów, jego adres IP zmieni się tam automatycznie.
+        Nowy adres musi być w sieci komputera z panelem i nie może być zajęty przez inne urządzenie.</div>
       <div class="form">
         <label class="fld"><span class="lbl">Adres IP</span><input type="text" id="netIp"></label>
         <label class="fld"><span class="lbl">Brama</span><input type="text" id="netGw"></label>
