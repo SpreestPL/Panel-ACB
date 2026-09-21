@@ -296,6 +296,15 @@ wystarczy połączyć się z nim, podając jego dane logowania.
 | **ACB-002** | 2 (2 przekaźniki, 4 czytniki: wejście + wyjście na drzwi) | ✅ zweryfikowany na sprzęcie w obu językach interfejsu (odczyty, użytkownicy, auto-dodawanie, nazwa drzwi #2); zdalne otwieranie i hasła drzwi #2 niesprawdzone fizycznie |
 | **ACB-004** | 4 | ✅ zweryfikowany na sprzęcie (nr 400000004, fabrycznie po chińsku): odczyty, nazwy / czasy / hasła drzwi #3–#4, użytkownicy z uprawnieniami do drzwi, auto-dodawanie, przełączenie na angielski; zdalne otwieranie niesprawdzone fizycznie |
 
+> **Uwaga — brak szyfrowania HTTPS w kontrolerach:** kontrolery **ACB-001**, **ACB-002** i **ACB-004**
+> nie obsługują szyfrowania HTTPS (tylko czysty HTTP), więc ruch panel → kontroler zawsze jest nieszyfrowany.
+> Zalecane podłączenie sieciowe:
+> - kontroler podłączony **bezpośrednio do serwera** z panelem, albo
+> - kontroler i serwer w **osobnym VLAN-ie na switchu zarządzalnym** (tylko kontroler i serwer, bez innych urządzeń),
+>
+> a sam panel wystawiony dla użytkowników **po HTTPS** (`ACS_TLS_CERT` / `ACS_TLS_KEY` albo serwer HTTPS
+> przed panelem z `ACS_TRUST_PROXY=1`) — patrz [Uwagi bezpieczeństwa](#uwagi-bezpieczeństwa).
+
 Cała rodzina używa tego samego protokołu HTTP. Panel obsługuje interfejs urządzenia
 po angielsku i po chińsku (fabryczny ACB-002 pracuje po chińsku). Przy połączeniu panel
 przełącza chiński interfejs urządzenia na angielski (`ACS_FORCE_ENGLISH=0` wyłącza). Ustawienia drzwi
@@ -410,7 +419,9 @@ w `.1`). Ścieżkę zmienia `ACS_DEVICE_LOG`.
   nigdy nie wystawiaj go bezpośrednio do internetu.
 - **Kontroler nie obsługuje HTTPS** (firmware „Web Controller” V6.62: tylko HTTP na porcie 80 i UDP 60000) —
   nie da się tego włączyć. Szyfrować można tylko odcinek przeglądarka → panel (`ACS_TLS_CERT` albo serwer HTTPS
-  przed panelem). Najlepsza izolacja: panel na małym komputerze podłączonym do kontrolera kablem.
+  przed panelem). Dotyczy to wszystkich modeli: ACB-001, ACB-002 i ACB-004. Zalecana topologia: kontroler
+  podłączony bezpośrednio do serwera z panelem albo kontroler i serwer w wydzielonym VLAN-ie na switchu
+  zarządzalnym, a panel udostępniony użytkownikom wyłącznie po HTTPS.
 - Panel słuchający w sieci (`ACS_BIND` inny niż 127.0.0.1) bez HTTPS: hasła do panelu idą otwartym tekstem —
   panel ostrzega o tym przy starcie i w „Ustawieniach panelu”.
 - Katalog danych zawiera hasła zapisanych kontrolerów, numery kart, nazwiska i kopie — chroń go.
