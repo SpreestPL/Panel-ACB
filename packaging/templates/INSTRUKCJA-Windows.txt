@@ -43,8 +43,7 @@ PIERWSZE POŁĄCZENIE
    albo wpisz jego adres IP ręcznie.
 2. Dane logowania fabrycznego kontrolera: login abc, hasło 654321
    (program sam próbuje też danych fabrycznych).
-3. Kontroler z chińskim menu zostanie automatycznie przełączony na angielski.
-4. „Zapisz kontroler” zapamięta go na liście – następnym razem wystarczy jedno kliknięcie.
+3. „Zapisz kontroler” zapamięta go na liście – następnym razem wystarczy jedno kliknięcie.
 
 WAŻNE
 - Każdy kontroler obsługuje tylko jedno połączenie naraz (panel może być połączony

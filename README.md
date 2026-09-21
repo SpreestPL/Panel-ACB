@@ -48,7 +48,6 @@ Konfiguracja przez zmienne środowiskowe (opcjonalnie):
 | `ACS_BIND` | adres nasłuchu panelu (np. IP serwera w LAN, żeby otwierać panel z innych komputerów) | `127.0.0.1` |
 | `ACS_DATA` | katalog danych (zapisane kontrolery, dziennik) | Windows `%APPDATA%\ACB Panel`, macOS `~/Library/Application Support/ACB Panel`, Linux `~/.local/share/acb-panel` |
 | `ACS_NO_BROWSER` | `1` = nie otwieraj przeglądarki po starcie | — |
-| `ACS_FORCE_ENGLISH` | `0` = nie przełączaj chińskiego interfejsu urządzenia na angielski | `1` |
 | `ACS_TLS_CERT` / `ACS_TLS_KEY` | pliki PEM certyfikatu i klucza — panel działa po **HTTPS** | — |
 | `ACS_ADMIN_LOGIN` / `ACS_ADMIN_PASSWORD` | pierwsze konto administratora panelu (tylko gdy nie ma żadnego konta) | — |
 | `ACS_AUTH` | `0` = bez logowania (działa tylko przy `ACS_BIND=127.0.0.1`) | — |
@@ -293,8 +292,8 @@ wystarczy połączyć się z nim, podając jego dane logowania.
 | Model | Drzwi | Status profilu |
 |---|---|---|
 | **ACB-001** | 1 | ✅ w pełni zweryfikowany na sprzęcie |
-| **ACB-002** | 2 (2 przekaźniki, 4 czytniki: wejście + wyjście na drzwi) | ✅ zweryfikowany na sprzęcie w obu językach interfejsu (odczyty, użytkownicy, auto-dodawanie, nazwa drzwi #2); zdalne otwieranie i hasła drzwi #2 niesprawdzone fizycznie |
-| **ACB-004** | 4 | ✅ zweryfikowany na sprzęcie (nr 400000004, fabrycznie po chińsku): odczyty, nazwy / czasy / hasła drzwi #3–#4, użytkownicy z uprawnieniami do drzwi, auto-dodawanie, przełączenie na angielski; zdalne otwieranie niesprawdzone fizycznie |
+| **ACB-002** | 2 (2 przekaźniki, 4 czytniki: wejście + wyjście na drzwi) | ✅ zweryfikowany na sprzęcie (odczyty, użytkownicy, auto-dodawanie, nazwa drzwi #2); zdalne otwieranie i hasła drzwi #2 niesprawdzone fizycznie |
+| **ACB-004** | 4 | ✅ zweryfikowany na sprzęcie (nr 400000004): odczyty, nazwy / czasy / hasła drzwi #3–#4, użytkownicy z uprawnieniami do drzwi, auto-dodawanie; zdalne otwieranie niesprawdzone fizycznie |
 
 > **Uwaga — brak szyfrowania HTTPS w kontrolerach:** kontrolery **ACB-001**, **ACB-002** i **ACB-004**
 > nie obsługują szyfrowania HTTPS (tylko czysty HTTP), więc ruch panel → kontroler zawsze jest nieszyfrowany.
@@ -305,9 +304,7 @@ wystarczy połączyć się z nim, podając jego dane logowania.
 > a sam panel wystawiony dla użytkowników **po HTTPS** (`ACS_TLS_CERT` / `ACS_TLS_KEY` albo serwer HTTPS
 > przed panelem z `ACS_TRUST_PROXY=1`) — patrz [Uwagi bezpieczeństwa](#uwagi-bezpieczeństwa).
 
-Cała rodzina używa tego samego protokołu HTTP. Panel obsługuje interfejs urządzenia
-po angielsku i po chińsku (fabryczny ACB-002 pracuje po chińsku). Przy połączeniu panel
-przełącza chiński interfejs urządzenia na angielski (`ACS_FORCE_ENGLISH=0` wyłącza). Ustawienia drzwi
+Cała rodzina używa tego samego protokołu HTTP. Ustawienia drzwi
 (nazwa, czas otwarcia, 4 hasła) są osobne dla każdych drzwi, a log przejść pokazuje drzwi
 i czytnik (wejście/wyjście). Każdy użytkownik ma osobne uprawnienie do każdych drzwi
 („Edytuj / dostęp” na liście użytkowników; nowa karta ma dostęp do wszystkich drzwi).
