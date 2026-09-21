@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.log
+.DS_Store
+controllers.json
+controllers.json.tmp
+dist/
+packaging/.cache/
+*.zip.part

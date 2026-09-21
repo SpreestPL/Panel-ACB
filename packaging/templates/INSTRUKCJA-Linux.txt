@@ -1,0 +1,62 @@
+SPREEST - PANEL ACB - kontrola dostępu  (wersja {{VERSION}})
+==============================================================={{MODE_TITLE}}
+
+{{MODE_FEATURES}}
+{{MODE_INFO}}
+WYMAGANIA
+- Komputer w tej samej sieci lokalnej co kontroler.
+- Dowolna przeglądarka (Chrome, Edge, Firefox, Safari).
+- Linux 64-bit (x86_64 lub ARM64, np. Raspberry Pi 4/5 z 64-bitowym systemem),
+  z biblioteką glibc 2.17 lub nowszą (praktycznie każda dystrybucja z ostatnich lat).
+
+URUCHOMIENIE
+1. Rozpakuj archiwum ZIP (menedżerem archiwów albo w terminalu: unzip ACB-Panel-*.zip).
+2. W folderze „{{TOP}}” uruchom „{{START}}”:
+   - dwuklik i „Uruchom” (w niektórych menedżerach plików: prawy przycisk ->
+     „Uruchom jako program”), albo
+   - w terminalu:  cd "{{TOP}}"  &&  ./{{START}}
+   Jeśli plik nie chce się uruchomić (brak uprawnień po rozpakowaniu):
+     chmod +x {{START}} runtime/*/bin/python3*
+3. Przeglądarka otworzy się sama. Jeśli nie, wpisz adres podany w terminalu
+   (zwykle http://127.0.0.1:8088).
+
+ZAMYKANIE
+Zamknij okno terminala z panelem (lub naciśnij w nim Ctrl+C).
+
+GDZIE SĄ DANE
+Lista zapisanych kontrolerów, baza panelu, kopie zapasowe i dziennik: ~/.local/share/acb-panel
+Hasła zapisanych kontrolerów (jeśli zaznaczono „Zapamiętaj hasło”) są tam
+przechowywane bez szyfrowania.
+
+ODINSTALOWANIE
+Usuń folder „{{TOP}}” oraz folder ~/.local/share/acb-panel.
+
+PIERWSZE URUCHOMIENIE
+Przy pierwszym uruchomieniu panel poprosi o utworzenie konta administratora panelu
+(login i hasło, co najmniej 8 znaków). Kolejne konta - z rolą Podgląd, Operator albo
+Administrator - dodasz w zakładce „Konta panelu”. Aktualizacja z wersji 1.x: dane
+(kontrolery, działy, log) zostają, trzeba tylko utworzyć konto.
+
+PIERWSZE POŁĄCZENIE
+1. W zakładce „Kontrolery” kliknij „Wyszukaj”, żeby znaleźć kontroler w sieci,
+   albo wpisz jego adres IP ręcznie.
+2. Dane logowania fabrycznego kontrolera: login abc, hasło 654321
+   (program sam próbuje też danych fabrycznych).
+3. Kontroler z chińskim menu zostanie automatycznie przełączony na angielski.
+4. „Zapisz kontroler” zapamięta go na liście – następnym razem wystarczy jedno kliknięcie.
+
+WAŻNE
+- Każdy kontroler obsługuje tylko jedno połączenie naraz (panel może być połączony
+  z kilkoma różnymi kontrolerami). Gdy panel jest połączony, nie otwieraj strony
+  kontrolera w przeglądarce i nie uruchamiaj panelu na drugim komputerze. Jeśli kontroler przestanie odpowiadać, odczekaj minutę i połącz się ponownie.
+- Numery kart wpisuj bez zer na początku (0000123456 -> 123456).
+
+BEZPIECZEŃSTWO
+- Połączenie z kontrolerem NIE jest szyfrowane (HTTP): login, hasło, numery kart
+  i polecenia otwarcia drzwi da się podsłuchać w sieci. Używaj urządzenia w sieci
+  lokalnej z rozwagą – najlepiej w wydzielonej sieci, bez dostępu z Wi-Fi dla gości,
+  i nigdy nie wystawiaj kontrolera do internetu.
+- Zmień fabryczny login i hasło kontrolera (zakładka „System”).
+- Panel jest dostępny tylko na tym komputerze (adres 127.0.0.1) i wymaga logowania.
+- Lista kontrolerów z hasłami, baza panelu i kopie zapasowe (folder „kopie”) leżą
+  w folderze danych - chroń go, bo zawiera numery kart i nazwiska.
