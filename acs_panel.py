@@ -74,7 +74,7 @@ from urllib.parse import urlparse, parse_qs, urlencode
 import http.client
 
 
-APP_VERSION = "2.6.2"
+APP_VERSION = "2.7.0"
 
 # Tryb pracy panelu (ACS_MODE):
 #   online  - panel jest stale połączony z kontrolerem i pracuje w tle: przełącza PIN-y kart przy kilku
@@ -1051,6 +1051,7 @@ class AcbController:
     def add_card(self, card, name):
         if not re.fullmatch(r"\d{1,19}", card or ""):
             raise ControllerError("Numer karty musi być liczbą (do 19 cyfr)")
+        _CARDS_NOW.pop(ctrl_key(self), None)
         with self.lock:
             s, _ = self._session()
             before = self._users_total(s)
@@ -1214,6 +1215,7 @@ class AcbController:
                     "access": [after.get(n) for n in range(1, self.doors + 1)]}
 
     def delete_user(self, user_id, card=""):
+        _CARDS_NOW.pop(ctrl_key(self), None)
         with self.lock:
             s, _ = self._session()
             r = self._find_user(s, user_id, card)["drow"]
@@ -2466,6 +2468,14 @@ def _db_migrate(con):
         if "cleared_to" not in {r[1] for r in con.execute("PRAGMA table_info(sync_state)")}:
             con.execute("ALTER TABLE sync_state ADD COLUMN cleared_to TEXT NOT NULL DEFAULT ''")
         con.execute("PRAGMA user_version = 3")
+    if con.execute("PRAGMA user_version").fetchone()[0] < 4:
+        # 2.7.0: kod powodu odmowy (strona WWW kontrolera go nie podaje - bierzemy z UDP 0xB0).
+        # NULL = jeszcze nie sprawdzony, 0 = nie udało się ustalić.
+        if "reason" not in {r[1] for r in con.execute("PRAGMA table_info(swipes)")}:
+            con.execute("ALTER TABLE swipes ADD COLUMN reason INTEGER")
+        con.execute("UPDATE swipes SET reason = (SELECT l.reason FROM live_events l WHERE l.ctrl = swipes.ctrl "
+                    "AND l.record = swipes.record AND l.time = swipes.time) WHERE granted = 0 AND card <> ''")
+        con.execute("PRAGMA user_version = 4")
 
 
 # -- ustawienia panelu (JSON w tabeli settings) --
@@ -2678,6 +2688,55 @@ def person_assign(card, name, dept_id):
             out["pins"] = res["changed"]
     pins_sync_all(skip=c)
     return out
+
+
+# -- spis kart panelu --
+# Tabela people to wspólny dla wszystkich kontrolerów spis „numer karty -> nazwa, dział”. Usunięcie karty
+# z kontrolera go nie rusza (log przejść i czas pracy zachowują nazwisko), więc karta przyłożona potem do
+# innego kontrolera dalej pokazuje się w logu z imieniem. Stąd ręczne „usuń ze spisu”.
+def people_directory():
+    checked, unchecked, where = [], [], {}
+    for c in connected():
+        name = saved_name(c) or c.host
+        cards = _cards_now(c, max_age=0)
+        if cards is None:
+            unchecked.append(name)
+            continue
+        checked.append(name)
+        for card in cards:
+            where.setdefault(card, []).append(name)
+    with db() as con:
+        seen = {r[0]: r[1] for r in con.execute("SELECT card, MAX(time) FROM swipes WHERE card <> '' GROUP BY card")}
+        rows = [dict(r) for r in con.execute(
+            "SELECT p.card, p.name, p.dept_id, d.name AS dept FROM people p "
+            "LEFT JOIN departments d ON d.id = p.dept_id")]
+    for r in rows:
+        r["on"] = where.get(r["card"], [])
+        r["last_seen"] = seen.get(r["card"]) or ""
+    rows.sort(key=lambda r: (bool(r["on"]), (r["name"] or "~").lower(), r["card"]))
+    return {"people": rows, "checked": checked, "unchecked": unchecked}
+
+
+def person_forget(card):
+    """Usuwa kartę ze spisu panelu (nazwa i dział). Tylko karty, których nie ma w żadnym połączonym
+    kontrolerze - inaczej panel i tak odczytałby nazwę z powrotem przy następnym wczytaniu użytkowników."""
+    ck = card_key(card)
+    if not ck:
+        raise ControllerError("Brak numeru karty")
+    for c in connected():
+        try:
+            present = int(ck) <= 0xFFFFFFFF and c.udp().privilege(int(ck)) is not None
+        except (ControllerError, OSError) as e:
+            raise ControllerError(f"Nie sprawdzono, czy karta jest w kontrolerze {saved_name(c) or c.host} ({e}) - "
+                                  "spróbuj ponownie")
+        if present:
+            raise ControllerError(f"Karta {ck} jest zapisana w kontrolerze {saved_name(c) or c.host} - najpierw usuń ją "
+                                  "tam (Pracownicy i karty → Użytkownicy), inaczej nazwa wróci przy wczytaniu listy")
+    with db() as con:
+        if not con.execute("DELETE FROM people WHERE card = ?", (ck,)).rowcount:
+            raise ControllerError("Tej karty nie ma w spisie panelu")
+        con.execute("DELETE FROM entry_free_people WHERE card = ?", (ck,))
+    return {"ok": True, "msg": f"Usunięto kartę {ck} ze spisu panelu", **people_directory()}
 
 
 def _privileges_map(c):
@@ -3649,6 +3708,72 @@ def _store_swipes(key, rows):
         return con.total_changes - before
 
 
+REASON_FILL_MAX = 300       # rekordów odczytywanych po UDP na jedno pobranie logu (reszta następnym razem)
+
+
+def _fill_reasons(c, key):
+    """Uzupełnia kod powodu odmów w kopii logu. Strona WWW kontrolera pokazuje tylko „Denied”, a kod
+    (6 brak uprawnienia, 7 brak PIN-u, 15 poza godzinami/ważnością…) ma rekord UDP o tym samym numerze.
+    Najpierw z podglądu na żywo (live_events), potem odczytem 0xB0 - z kontrolą czasu i karty, bo po
+    przepełnieniu logu numer rekordu mógłby wskazywać inne zdarzenie."""
+    with db() as con:
+        con.execute("UPDATE swipes SET reason = (SELECT l.reason FROM live_events l WHERE l.ctrl = swipes.ctrl "
+                    "AND l.record = swipes.record AND l.time = swipes.time) "
+                    "WHERE ctrl = ? AND granted = 0 AND card <> '' AND reason IS NULL", (key,))
+        todo = con.execute("SELECT record, time, card FROM swipes WHERE ctrl = ? AND granted = 0 AND card <> '' "
+                           "AND reason IS NULL ORDER BY time DESC LIMIT ?", (key, REASON_FILL_MAX)).fetchall()
+    if not todo:
+        return
+    found = []
+    try:
+        wg = c.udp()
+        for r in todo:
+            ev = wg.event(int(r["record"]))
+            ok = (ev["time"] is not None and ev["time"].strftime("%Y-%m-%d %H:%M:%S") == r["time"]
+                  and card_key(ev["card"]) == r["card"])
+            found.append((ev["reason"] if ok else 0, r["record"], r["time"]))
+    except (ControllerError, OSError) as e:
+        _devlog(f"Kody powodu odmów przez UDP - błąd: {e}")     # reszta zostaje NULL, spróbujemy przy kolejnym
+    if found:
+        with db() as con:
+            con.executemany("UPDATE swipes SET reason = ? WHERE ctrl = ? AND record = ? AND time = ?",
+                            [(reason, key, rec, t) for reason, rec, t in found])
+
+
+_CARDS_NOW = {}             # ctrl_key -> (czas odczytu, numery kart w kontrolerze) - do opisu odmów w logu
+CARDS_NOW_AGE = 60
+
+
+def _cards_now(c, max_age=CARDS_NOW_AGE):
+    """Numery kart zapisanych teraz w kontrolerze (UDP, pamiętane max_age s) albo None, gdy odczyt się nie udał."""
+    key = ctrl_key(c)
+    hit = _CARDS_NOW.get(key)
+    if hit and time.time() - hit[0] < max_age:
+        return hit[1]
+    try:
+        cards = {str(struct.unpack_from("<I", p, 0)[0]) for p in c.udp().privileges()}
+    except (ControllerError, OSError) as e:
+        _devlog(f"Lista kart z kontrolera (opis odmów) błąd: {e}")
+        return None
+    _CARDS_NOW[key] = (time.time(), cards)
+    _CARDS[key] = set(cards)
+    return cards
+
+
+# odmowy, przy których karta nieobecna w kontrolerze tłumaczy sprawę (kod 6 ten firmware daje też nieznanej karcie)
+DENY_NOT_STORED = {6, WG_REASON_UNKNOWN_CARD}
+NOT_STORED_TEXT = "karta nie jest zapisana w tym kontrolerze"
+
+
+def deny_text(reason, on_ctrl):
+    """Opis odmowy dla logu: kod powodu z kontrolera + czy karta jest teraz w kontrolerze (None = nie wiadomo)."""
+    if on_ctrl is False and (reason in DENY_NOT_STORED or not reason):
+        return NOT_STORED_TEXT
+    if reason:
+        return WG_REASONS.get(reason, f"kod {reason}")
+    return ""
+
+
 def _sync_run(c, key, st):
     try:
         with db() as con:
@@ -3678,6 +3803,7 @@ def _sync_run(c, key, st):
             if done:
                 break
             after = chunk[-1]
+        _fill_reasons(c, key)
     except Exception as e:
         st["error"] = str(e)
     finally:
@@ -3744,11 +3870,17 @@ def log_local(q):
     with db() as con:
         total = con.execute(f"SELECT COUNT(*) FROM swipes s WHERE {where}", args).fetchone()[0]
         rows = [dict(r) for r in con.execute(
-            f"SELECT s.record, s.time, s.card, s.name, s.door, s.reader, s.granted, s.status, {PASSED_SQL} AS passed, "
-            "COALESCE(p.name, '') AS person, d.name AS dept FROM swipes s "
+            f"SELECT s.record, s.time, s.card, s.name, s.door, s.reader, s.granted, s.status, s.reason, "
+            f"{PASSED_SQL} AS passed, COALESCE(p.name, '') AS person, d.name AS dept FROM swipes s "
             "LEFT JOIN people p ON p.card = s.card LEFT JOIN departments d ON d.id = p.dept_id "
             f"WHERE {where} ORDER BY s.time DESC, s.record DESC LIMIT ? OFFSET ?",
             args + [LOG_PAGE_SIZE, (page - 1) * LOG_PAGE_SIZE])]
+    denied = [r for r in rows if r["card"] and not r["granted"] and not r["passed"]]
+    # listę kart czytamy tylko wtedy, gdy na stronie jest odmowa, przy której ma to znaczenie
+    cards = _cards_now(c) if any(r["reason"] in DENY_NOT_STORED or not r["reason"] for r in denied) else None
+    for r in denied:
+        r["on_ctrl"] = None if cards is None else r["card"] in cards
+        r["reason_text"] = deny_text(r["reason"], r["on_ctrl"])
     return {"rows": rows, "total": total, "page": page,
             "pages": max((total + LOG_PAGE_SIZE - 1) // LOG_PAGE_SIZE, 1), "sync": _sync_public(key)}
 
@@ -4102,6 +4234,17 @@ def event_kind(ev):
     return "device"
 
 
+def _live_text(c, ev, card):
+    """Jak event_text, ale odmowę karty, której nie ma w kontrolerze, nazywa wprost (tylko z listy kart już
+    odczytanej - podgląd na żywo nie odpytuje kontrolera o każdą odmowę)."""
+    if ev["type"] == WG_EVENT_SWIPE and not ev["granted"] and ev["reason"] in DENY_NOT_STORED:
+        hit = _CARDS_NOW.get(ctrl_key(c))
+        cards = hit[1] if hit else _CARDS.get(ctrl_key(c))
+        if cards is not None and card not in cards:
+            return f"odmowa ({'wejście' if ev['dir'] == WG_DIR_IN else 'wyjście'}): {NOT_STORED_TEXT}"
+    return event_text(ev)
+
+
 def _live_public(c, ev, names, blocks):
     card = card_key(ev["card"]) if ev["type"] == WG_EVENT_SWIPE else ""
     p = names.get(card) or {}
@@ -4109,7 +4252,7 @@ def _live_public(c, ev, names, blocks):
     return {"seq": next(_LIVE_SEQ), "ctrl": ctrl_key(c), "record": ev["record"],
             "time": ev["time"].strftime("%Y-%m-%d %H:%M:%S") if ev["time"] else "",
             "card": card, "name": p.get("name", ""), "dept": p.get("dept") or "", "door": ev["door"],
-            "door_name": doors.get(ev["door"], ""), "kind": event_kind(ev), "text": event_text(ev),
+            "door_name": doors.get(ev["door"], ""), "kind": event_kind(ev), "text": _live_text(c, ev, card),
             "blocked": card in blocks, "alert": event_kind(ev) in ("denied", "alarm")}
 
 
@@ -5553,6 +5696,7 @@ ROUTES_GET = {
     "/api/swipe/sync": (lambda q: _sync_public(ctrl_key(require_active())), "viewer"),
     "/api/log": (log_local, "viewer"),
     "/api/people": (lambda q: people_list(), "viewer"),
+    "/api/people/directory": (lambda q: people_directory(), "viewer"),
     "/api/departments": (lambda q: {"departments": departments()}, "viewer"),
     "/api/tracking": (lambda q: tracking_state(), "viewer"),
     "/api/doors/open": (lambda q: door_watch_config(), "viewer"),
@@ -5591,6 +5735,7 @@ ROUTES_POST = {
     "/api/departments/delete": (lambda b: dept_delete(_b(b, "id")), "operator"),
     "/api/people/assign": (lambda b: person_assign(_b(b, "card"), _b(b, "name"), _b(b, "dept_id")), "operator"),
     "/api/people/assign-bulk": (lambda b: people_assign_bulk(_b(b, "cards"), _b(b, "dept_id")), "operator"),
+    "/api/people/forget": (lambda b: person_forget(_b(b, "card")), "operator"),
     "/api/tracking": (lambda b: tracking_set(_b(b, "door"), _b(b, "enabled") == "1"), "admin"),
     "/api/doors/open": (lambda b: door_watch_set(_b(b, "door"), _b(b, "enabled") == "1", _b(b, "minutes")), "admin"),
     "/api/entryhours": (lambda b: entry_hours_save(_b(b, "config")), "admin"),
@@ -5683,6 +5828,8 @@ AUDIT_POST = {
     "/api/people/assign-bulk": ("Przypisanie wielu osób do działu",
                                 lambda b: f"kart: {len([x for x in re.split(r'[,;\s]+', _b(b, 'cards')) if x])} → "
                                           f"{_dept_txt(b) or 'bez działu'}"),
+    "/api/people/forget": ("Usunięcie karty ze spisu panelu", lambda b: f"karta {_b(b, 'card')}"
+                                                                         + (f" ({_b(b, 'name')})" if _b(b, "name") else "")),
     "/api/autoadd": ("Tryb dodawania kart przyłożeniem", lambda b: "włączony"),
     "/api/autoadd/stop": ("Tryb dodawania kart przyłożeniem", lambda b: "wyłączony"),
     "/api/edituser": ("Edycja użytkownika", lambda b: f"ID {_b(b, 'user_id')}, karta {_b(b, 'card')}, nazwa „{_b(b, 'name')}”, "
@@ -6776,6 +6923,23 @@ tr.past td{opacity:.55}
           <li>Obie funkcje używają kanału UDP 60000 kontrolera. Sprawdzone na atrapie kontrolera - na sprzęcie przetestuj kartą z datą „do” wczoraj.</li>
         </ul></div></details>
     </div>
+    <div class="card" id="dirCard">
+      <div class="ch"><h2>Spis kart panelu</h2><span class="muted small" id="dirCount"></span><div class="spacer"></div>
+        <label class="small muted" style="white-space:nowrap"><input type="checkbox" id="dirAll" onchange="renderDirectory()"> pokaż też karty zapisane w kontrolerach</label>
+        <button class="btn ghost sm" onclick="loadDirectory()">Odśwież</button></div>
+      <p class="lead" style="margin:0">Panel pamięta nazwę i dział każdej karty, którą kiedykolwiek widział - wspólnie dla wszystkich
+        kontrolerów. Usunięcie karty z kontrolera tego spisu <b>nie czyści</b> (dzięki temu log i czas pracy zachowują nazwisko),
+        więc ta sama karta przyłożona do innego kontrolera dalej pokaże się w logu z imieniem. Kartę, której już nie ma
+        w żadnym kontrolerze, możesz tu usunąć ze spisu.</p>
+      <div class="tw" style="margin-top:12px"><table><thead><tr>
+        <th>Nr karty</th><th>Nazwa</th><th>Dział</th><th>W kontrolerach</th><th>Ostatnio w logu</th><th></th></tr></thead>
+        <tbody id="dirBody"></tbody></table></div>
+      <p class="small warn-t" id="dirNote" style="margin:10px 0 0" hidden></p>
+      <p class="hint" style="margin:10px 0 0">Usunięcie ze spisu kasuje tylko nazwę i dział w panelu. Wpisy w logu zostają, ale ta karta
+        pokaże się w nich bez nazwy (chyba że kontroler zapisał nazwę w samym rekordzie). Panel sprawdza tylko
+        <b>połączone</b> kontrolery - jeśli karta jest w kontrolerze, z którym panel teraz nie jest połączony, nazwa wróci
+        przy następnym wczytaniu jego użytkowników.</p>
+    </div>
     <div class="card" id="backupCard" data-role="operator">
       <div class="ch"><h2>Kopia zapasowa użytkowników</h2><div class="spacer"></div>
         <button class="btn ghost sm" onclick="downloadBackup(this)">⬇️ Pobierz kopię</button>
@@ -7316,7 +7480,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
   b.classList.add('active'); $('#'+b.dataset.tab).classList.add('active');
   if(b.dataset.tab==='find')loadSaved();
-  if(b.dataset.tab==='cards'){loadUsers();restoreResume();bulkResume();}
+  if(b.dataset.tab==='cards'){loadUsers();restoreResume();bulkResume();loadDirectory();}
   if(b.dataset.tab==='log')openLogTab();
   if(b.dataset.tab==='work')openWorkTab();
   if(b.dataset.tab==='door'||b.dataset.tab==='system')fillForms();
@@ -8158,6 +8322,34 @@ async function delUser(id,label){if(!confirm('Usunąć: '+label+' (ID '+id+')?')
   try{await api('/api/deluser',form({user_id:id,card:u.card||''}));toast('Usunięto ID '+id,'ok');loadUsers();}
   catch(e){toast('Błąd: '+e.message,'err');}}
 
+// --- spis kart panelu (tabela people) - usuwanie kart, których nie ma już w żadnym kontrolerze ---
+let dirData=null,dirBusy=false;
+async function loadDirectory(){if(dirBusy)return;dirBusy=true;
+  $('#dirBody').innerHTML='<tr><td colspan="6" class="muted"><span class="spin"></span> Sprawdzanie kart w kontrolerach...</td></tr>';
+  try{dirData=await api('/api/people/directory');renderDirectory();}
+  catch(e){$('#dirBody').innerHTML='<tr><td colspan="6" class="muted">'+esc(e.message)+'</td></tr>';}
+  finally{dirBusy=false;}}
+function renderDirectory(){const d=dirData;if(!d)return;
+  const all=$('#dirAll').checked,orphans=d.people.filter(p=>!p.on.length);
+  const list=all?d.people:orphans;
+  $('#dirCount').textContent='w spisie: '+d.people.length+' · poza kontrolerami: '+orphans.length;
+  const op=can('operator');
+  $('#dirBody').innerHTML=list.length?list.map(p=>`<tr><td>${cardCell(p.card)}</td>
+    <td>${p.name?esc(p.name):'<span class="muted">bez nazwy</span>'}</td><td>${p.dept?esc(p.dept):'<span class="muted">—</span>'}</td>
+    <td>${p.on.length?esc(p.on.join(', ')):'<span class="muted">brak</span>'}</td>
+    <td style="white-space:nowrap">${p.last_seen?esc(p.last_seen):'<span class="muted">—</span>'}</td>
+    <td>${op&&!p.on.length?`<button class="btn danger sm" onclick="forgetCard(this,'${esc(p.card)}')">Usuń ze spisu</button>`:''}</td></tr>`).join('')
+    :'<tr><td colspan="6" class="muted">'+(all?'Spis jest pusty':'Wszystkie karty ze spisu są zapisane w połączonych kontrolerach')+'</td></tr>';
+  const notes=[];
+  if(!d.checked.length&&!d.unchecked.length)notes.push('Brak połączonego kontrolera - panel nie wie, które karty są w kontrolerach, więc wszystkie widać jako „brak”.');
+  if(d.unchecked.length)notes.push('Nie odczytano listy kart z: '+d.unchecked.join(', ')+' - karty z tych kontrolerów mogą tu wyglądać na nieużywane.');
+  $('#dirNote').textContent=notes.join(' ');$('#dirNote').hidden=!notes.length;}
+async function forgetCard(b,card){const p=(dirData&&dirData.people.find(x=>x.card===card))||{};
+  if(!confirm('Usunąć kartę '+card+(p.name?' („'+p.name+'”)':'')+' ze spisu panelu?\n\nZniknie jej nazwa i dział. Wpisy w logu zostaną, ale bez nazwy. Kontrolerów to nie zmienia.'))return;
+  b.disabled=true;
+  try{dirData=await api('/api/people/forget',form({card,name:p.name||''}));toast(dirData.msg,'ok');renderDirectory();loadPeople();}
+  catch(e){toast('Błąd: '+e.message,'err');b.disabled=false;}}
+
 // --- kopia zapasowa użytkowników (karty + nazwy + działy; bez uprawnień do drzwi) ---
 let restoreData=null,restorePoll=null;
 async function downloadBackup(b){if(b)b.disabled=true;toast('Odczyt użytkowników z kontrolera...');
@@ -8249,7 +8441,7 @@ async function loadLog(){if(logBusy)return;logBusy=true;
       <td class="dir">${dirCell(r)}</td>
       <td>${r.card?(esc(r.person||r.name)||'<span class="muted">bez nazwy</span>')+'<br><span class="muted small">karta '+cardCell(r.card)+'</span>':'—'}</td>
       <td>${r.dept?esc(r.dept):'<span class="muted">—</span>'}</td><td>${r.door?'#'+r.door:'—'}</td>
-      <td class="small">${esc(r.status)}</td><td style="white-space:nowrap">${esc(r.time)}</td></tr>`).join('');
+      <td class="small">${esc(r.status)}${r.reason_text?'<br><span class="'+(r.on_ctrl===false?'warn-t':'muted')+'" title="'+(r.on_ctrl===false?'Stan listy kart kontrolera teraz. Nazwa pracownika pochodzi ze spisu kart panelu (Pracownicy i karty), nie z kontrolera.':'Powód odmowy zapisany przez kontroler')+'">'+esc(r.reason_text)+'</span>':''}</td><td style="white-space:nowrap">${esc(r.time)}</td></tr>`).join('');
   }catch(e){$('#swipeBody').innerHTML='<tr><td colspan="7" class="muted">'+esc(e.message)+'</td></tr>';}
   finally{logBusy=false;}}
 function logNav(n){logPage={first:1,prev:Math.max(logPage-1,1),next:Math.min(logPage+1,logPages),last:logPages}[n];loadLog();}
