@@ -74,7 +74,7 @@ from urllib.parse import urlparse, parse_qs, urlencode
 import http.client
 
 
-APP_VERSION = "2.8.0"
+APP_VERSION = "2.9.0"
 
 # Tryb pracy panelu (ACS_MODE):
 #   online  - panel jest stale połączony z kontrolerem i pracuje w tle: przełącza PIN-y kart przy kilku
@@ -2417,6 +2417,10 @@ CREATE INDEX IF NOT EXISTS work_corrections_card ON work_corrections(ctrl, card,
 CREATE TABLE IF NOT EXISTS notify_log(
   id INTEGER PRIMARY KEY, time TEXT NOT NULL, rule TEXT NOT NULL, title TEXT NOT NULL,
   text TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '');
+-- 2.9.0: wymiany kart - stary numer karty należy do tej samej osoby co nowy (czas pracy, „kto w środku”)
+CREATE TABLE IF NOT EXISTS card_replacements(
+  old TEXT PRIMARY KEY, new TEXT NOT NULL, time TEXT NOT NULL, login TEXT NOT NULL DEFAULT '',
+  ctrl TEXT NOT NULL DEFAULT '');
 -- 2.1.0: drzwi, którym panel liczy czas otwarcia (kontroler nie wysyła alarmu „otwarte zbyt długo”)
 CREATE TABLE IF NOT EXISTS door_open_watch(
   ctrl TEXT NOT NULL, door INTEGER NOT NULL, minutes INTEGER NOT NULL DEFAULT 5,
@@ -2722,9 +2726,11 @@ def people_directory():
         rows = [dict(r) for r in con.execute(
             "SELECT p.card, p.name, p.dept_id, d.name AS dept FROM people p "
             "LEFT JOIN departments d ON d.id = p.dept_id")]
+        alias = card_aliases(con)
     for r in rows:
         r["on"] = where.get(r["card"], [])
         r["last_seen"] = seen.get(r["card"]) or ""
+        r["replaced_by"] = alias.get(r["card"], "")
     rows.sort(key=lambda r: (bool(r["on"]), (r["name"] or "~").lower(), r["card"]))
     return {"people": rows, "checked": checked, "unchecked": unchecked}
 
@@ -2942,6 +2948,195 @@ def delete_user_active(user_id, card=""):
         with db() as con:
             con.execute("DELETE FROM card_blocks WHERE ctrl = ? AND card = ?", (ctrl_key(c), card_key(card)))
     return r
+
+
+# -- wymiana karty (nowy numer dla tej samej osoby) --
+# Strona WWW kontrolera nie pozwala zmienić numeru karty użytkownika, więc wymiana to: dodanie nowej karty
+# pod tą samą nazwą (ACT_ID_312), skopiowanie uprawnienia starej karty (UDP 0x50: drzwi, daty ważności, PIN)
+# i usunięcie starej (ACT_ID_324) - od tej chwili stara karta nie otwiera drzwi. W panelu zostaje wpis
+# card_replacements: odbicia starej karty liczą się tej samej osobie (czas pracy, „kto w środku”), a nazwa
+# i dział przechodzą na nowy numer. Kolejność kroków jest celowa: przy błędzie w połowie stara karta
+# dalej działa, a panel mówi, co zostało do zrobienia.
+def card_aliases(con):
+    """{stary numer: aktualny numer} - łańcuchy wymian (A -> B -> C) rozwiązane do końca."""
+    direct = {r[0]: r[1] for r in con.execute("SELECT old, new FROM card_replacements")}
+    out = {}
+    for old in direct:
+        cur, seen = old, {old}
+        while cur in direct and direct[cur] not in seen:
+            cur = direct[cur]
+            seen.add(cur)
+        out[old] = cur
+    return out
+
+
+def card_group(con, card):
+    """Numer karty z wszystkimi numerami, które zastąpił (do filtrów logu i raportu)."""
+    k = card_key(card)
+    alias = card_aliases(con)
+    final = alias.get(k, k)
+    return sorted({final, k} | {o for o, n in alias.items() if n == final})
+
+
+def _new_card_check(new):
+    k = card_key(new)
+    if not re.fullmatch(r"\d{1,19}", (new or "").strip()):
+        raise ControllerError("Nowy numer karty musi być liczbą (same cyfry, bez spacji)")
+    if int(k) > 0xFFFFFFFF:
+        raise ControllerError("Numer karty jest za duży - kontroler przyjmuje do 4294967295")
+    if wg_read(k) == 0:
+        raise ControllerError(f"Numer {k} czytnik widzi jako 0 - takiej karty kontroler nie zarejestruje")
+    if wg_card(k) is None:
+        raise ControllerError(f"Kontroler nigdy nie zgłosi numeru {k}. Jeśli to numer nadrukowany na karcie, "
+                              f"wpisz {wg_read(k)} (patrz „Numer na karcie a numer w kontrolerze”).")
+    return k
+
+
+def _card_link(con, c, old, new, login):
+    """Wpis wymiany + nazwa i dział starej karty przeniesione na nową (jeśli nowa ich nie ma)."""
+    con.execute("INSERT INTO card_replacements(old, new, time, login, ctrl) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(old) DO UPDATE SET new = excluded.new, time = excluded.time, login = excluded.login, "
+                "ctrl = excluded.ctrl", (old, new, _now_str(), login, ctrl_key(c) if c else ""))
+    con.execute("DELETE FROM card_replacements WHERE old = ?", (new,))     # powrót do dawnego numeru
+    p = con.execute("SELECT name, dept_id FROM people WHERE card = ?", (old,)).fetchone()
+    if p:
+        con.execute("INSERT INTO people(card, name, dept_id) VALUES (?, ?, ?) ON CONFLICT(card) DO UPDATE SET "
+                    "name = CASE WHEN people.name = '' THEN excluded.name ELSE people.name END, "
+                    "dept_id = COALESCE(people.dept_id, excluded.dept_id)", (new, p["name"], p["dept_id"]))
+
+
+def _login_now():
+    sess = getattr(_REQ, "session", None)
+    return sess["login"] if sess else "system"
+
+
+def card_replace(user_id, old, new):
+    """Zmiana numeru karty użytkownika aktywnego kontrolera. Stara karta traci dostęp."""
+    c = require_active()
+    ko, kn = card_key(old), _new_card_check(new)
+    if not ko:
+        raise ControllerError("Brak dotychczasowego numeru karty")
+    if ko == kn:
+        raise ControllerError("Nowy numer jest taki sam jak dotychczasowy")
+    if c.auto:
+        raise ControllerError("Najpierw zakończ auto-dodawanie kart")
+    if _block_row(c, ko) is not None:
+        raise ControllerError("Karta jest zablokowana - najpierw ją odblokuj (blokada nie przechodzi na nowy numer)")
+    old_p = _card_priv(c, ko)                                   # sprawdza też kanał UDP
+    if c.udp().privilege(kn) is not None:
+        raise ControllerError(f"Karta {kn} jest już zapisana w tym kontrolerze - wybierz inny numer "
+                              "albo najpierw usuń tamtego użytkownika")
+    if not str(user_id or "").strip():         # pytanie przy dodawaniu karty zna tylko numer
+        hit = [u for u in c.users(ko)["users"] if card_key(u["card"]) == ko]
+        if not hit:
+            raise ControllerError(f"Nie znaleziono użytkownika z kartą {ko} na stronie kontrolera")
+        user_id = hit[0]["user_id"]
+    name = c.user_detail(user_id, ko)["name"]
+    c.add_card(kn, name)
+    try:
+        c.udp().write_privilege(dict(old_p, card=kn))
+    except (ControllerError, OSError) as e:
+        raise ControllerError(f"Dodano kartę {kn}, ale nie skopiowano uprawnień starej karty ({e}). Stara karta {ko} "
+                              f"nadal działa - sprawdź nową kartę w „Edytuj / dostęp” i usuń starą ręcznie.")
+    try:
+        c.delete_user(user_id, ko)
+        still = c.udp().privilege(ko) is not None
+    except (ControllerError, OSError) as e:
+        raise ControllerError(f"Karta {kn} działa z uprawnieniami starej, ale nie usunięto karty {ko} ({e}) - "
+                              "usuń ją ręcznie, inaczej dalej otwiera drzwi.")
+    if still:
+        raise ControllerError(f"Karta {kn} działa, ale kontroler nadal ma kartę {ko} - usuń ją ręcznie.")
+    with db() as con:
+        _card_link(con, c, ko, kn, _login_now())
+    _CARDS_NOW.pop(ctrl_key(c), None)
+    threading.Thread(target=entry_pins_sync, args=(c,), daemon=True).start()
+    r = {"ok": True, "msg": f"Karta {ko} zamieniona na {kn} - stara karta nie otwiera już drzwi"}
+    warn, others = [], []
+    for x in connected():
+        if x is c:
+            continue
+        with contextlib.suppress(ControllerError, OSError):
+            if x.udp().privilege(ko) is not None:
+                others.append(saved_name(x) or x.host)
+    if others:
+        warn.append(f"Stara karta {ko} jest nadal zapisana w kontrolerach: {', '.join(others)} - "
+                    "zmień ją także tam.")
+    if warn:
+        r["warning"] = " ".join(warn)
+    return r
+
+
+CARD_PICK_MAX_AGE = 600      # s - odmowa starsza nie nadaje się na „numer właśnie przyłożonej karty”
+
+
+def card_last_denied():
+    """Numer ostatniej odrzuconej karty spoza kontrolera (z ostatnich 10 min) - kontroler podaje numer tak,
+    jak go widzi, więc nic nie trzeba przeliczać z nadruku."""
+    c = require_active()
+    try:
+        wg = c.udp()
+        last = wg.last_event()
+        evs = [last] + [wg.event(i) for i in range(last["record"] - 1, max(0, last["record"] - 20), -1)]
+        clock = wg.clock(quiet=True)
+    except (ControllerError, OSError) as e:
+        raise ControllerError(f"Nie odczytano zdarzeń kontrolera (kanał UDP 60000): {e}")
+    cards = _cards_now(c, max_age=0) or set()
+    for e in evs:
+        if e["type"] != WG_EVENT_SWIPE or e["granted"] or e["time"] is None:
+            continue
+        age = (clock - e["time"]).total_seconds()
+        if age > CARD_PICK_MAX_AGE:
+            break
+        k = card_key(e["card"])
+        if k and k not in cards:
+            return {"card": k, "time": e["time"].strftime("%Y-%m-%d %H:%M:%S"), "door": e["door"],
+                    "ago": int(max(age, 0))}
+    raise ControllerError("W ostatnich 10 minutach nie było odmowy dla karty spoza kontrolera - przyłóż nową kartę "
+                          "do czytnika (kontroler ją odrzuci) i spróbuj ponownie")
+
+
+def card_link(old, new):
+    """Wymiana zarejestrowana tylko w panelu: stara karta nie jest już w żadnym połączonym kontrolerze
+    (np. usunięta przed 2.9.0), a nowa ma przejąć jej historię."""
+    ko, kn = card_key(old), card_key(new)
+    if not ko or not kn or not re.fullmatch(r"\d{1,19}", kn):
+        raise ControllerError("Podaj numery obu kart (same cyfry)")
+    if ko == kn:
+        raise ControllerError("Numery kart są takie same")
+    for x in connected():
+        try:
+            present = x.udp().privilege(int(ko)) is not None if int(ko) <= 0xFFFFFFFF else False
+        except (ControllerError, OSError) as e:
+            raise ControllerError(f"Nie sprawdzono kontrolera {saved_name(x) or x.host} ({e}) - spróbuj ponownie")
+        if present:
+            raise ControllerError(f"Karta {ko} jest nadal w kontrolerze {saved_name(x) or x.host} - użyj "
+                                  "„Zmień kartę” w tabeli użytkowników (stara karta straci wtedy dostęp)")
+    with db() as con:
+        _card_link(con, current_controller(), ko, kn, _login_now())
+    return {"ok": True, "msg": f"Karta {ko} połączona z kartą {kn} - czas pracy i „kto w środku” liczą je razem",
+            **people_directory()}
+
+
+def card_candidates(name, card=""):
+    """Osoby o tej samej nazwie z innym numerem karty - do pytania „czy to wymiana karty?” przy dodawaniu."""
+    n = " ".join((name or "").split()).casefold()
+    k = card_key(card)
+    if not n:
+        return {"candidates": []}
+    c = current_controller()
+    cards = _cards_now(c) if c is not None else None
+    with db() as con:
+        alias = card_aliases(con)
+        rows = [dict(r) for r in con.execute("SELECT p.card, p.name, d.name AS dept FROM people p "
+                                             "LEFT JOIN departments d ON d.id = p.dept_id")]
+    out = []
+    for r in rows:
+        if " ".join((r["name"] or "").split()).casefold() != n or r["card"] == k or r["card"] in alias:
+            continue
+        r["on_ctrl"] = None if cards is None else r["card"] in cards
+        out.append(r)
+    out.sort(key=lambda r: (not r["on_ctrl"], r["card"]))
+    return {"candidates": out}
 
 
 # -- kopia zapasowa użytkowników z działami --
@@ -3895,8 +4090,10 @@ def swipe_sync_start(c=None):
 def _log_filters(key, card="", dept="", day_from="", day_to=""):
     where, args = ["s.ctrl = ?"], [key]
     if card_key(card):
-        where.append("s.card = ?")
-        args.append(card_key(card))
+        with db() as con:
+            group = card_group(con, card_key(card))
+        where.append(f"s.card IN ({','.join('?' * len(group))})")
+        args.extend(group)
     if dept == "none":
         where.append("s.card <> '' AND s.card NOT IN (SELECT card FROM people WHERE dept_id IS NOT NULL)")
     elif str(dept or "").isdigit():
@@ -4066,7 +4263,10 @@ def worktime(q, c=None):
             f"WHERE {cwhere} AND s.deleted = ''", cargs)]
         people = _people_map(con)
         names = _log_names(con, key)
+        alias = card_aliases(con)
     events += [(r["card"], r["time"], r["reader"], r, 0) for r in corr]
+    # wymienione karty: odbicia starej karty liczą się osobie z nową kartą
+    events = [(alias.get(e[0], e[0]),) + tuple(e[1:]) for e in events]
     events.sort(key=lambda e: (e[0], e[1], e[4]))
     wcfg = setting("work")
     free = _free_days(c, d_from, d_to, wcfg)
@@ -4414,14 +4614,16 @@ def presence(c=None):
             [key, since, *doors, key, since, *doors, key, since]).fetchall()
         people = _people_map(con)
         names = _log_names(con, key)
+        alias = card_aliases(con)
     last = {}
     for r in sorted(rows, key=lambda r: r["time"]):
-        prev = last.get(r["card"])
+        card = alias.get(r["card"], r["card"])      # stara karta po wymianie = ta sama osoba
+        prev = last.get(card)
         if r["reader"] == "in":
-            last[r["card"]] = {"state": "in", "since": prev["since"] if prev and prev["state"] == "in" else r["time"],
+            last[card] = {"state": "in", "since": prev["since"] if prev and prev["state"] == "in" else r["time"],
                                "last": r["time"]}
         else:
-            last[r["card"]] = {"state": "out", "since": r["time"], "last": r["time"]}
+            last[card] = {"state": "out", "since": r["time"], "last": r["time"]}
     inside = []
     for card, v in last.items():
         if v["state"] != "in":
@@ -5770,6 +5972,8 @@ ROUTES_GET = {
     "/api/log": (log_local, "viewer"),
     "/api/people": (lambda q: people_list(), "viewer"),
     "/api/people/directory": (lambda q: people_directory(), "viewer"),
+    "/api/cards/candidates": (lambda q: card_candidates(_b(q, "name"), _b(q, "card")), "operator"),
+    "/api/cards/last-denied": (lambda q: card_last_denied(), "operator"),
     "/api/departments": (lambda q: {"departments": departments()}, "viewer"),
     "/api/tracking": (lambda q: tracking_state(), "viewer"),
     "/api/doors/open": (lambda q: door_watch_config(), "viewer"),
@@ -5822,6 +6026,8 @@ ROUTES_POST = {
     "/api/edituser": (lambda b: edit_user_active(_b(b, "user_id"), b["name"][0] if "name" in b else None, _access(b),
                                                  _b(b, "card")), "operator"),
     "/api/deluser": (lambda b: delete_user_active(_b(b, "user_id"), _b(b, "card")), "operator"),
+    "/api/cards/replace": (lambda b: card_replace(_b(b, "user_id"), _b(b, "old"), _b(b, "new")), "operator"),
+    "/api/cards/link": (lambda b: card_link(_b(b, "old"), _b(b, "new")), "operator"),
     "/api/card/validity": (lambda b: card_validity(_b(b, "card"), _b(b, "valid_from"), _b(b, "valid_to")), "operator"),
     "/api/card/block": (lambda b: card_block(_b(b, "card"), _b(b, "reason"), _b(b, "everywhere") == "1"), "operator"),
     "/api/card/unblock": (lambda b: card_unblock(_b(b, "card")), "operator"),
@@ -5911,6 +6117,8 @@ AUDIT_POST = {
     "/api/edituser": ("Edycja użytkownika", lambda b: f"ID {_b(b, 'user_id')}, karta {_b(b, 'card')}, nazwa „{_b(b, 'name')}”, "
                                                        f"dostęp {_b(b, 'access')}"),
     "/api/deluser": ("Usunięcie użytkownika", lambda b: f"ID {_b(b, 'user_id')}, karta {_b(b, 'card')}"),
+    "/api/cards/replace": ("Zmiana numeru karty", lambda b: f"ID {_b(b, 'user_id')}: karta {_b(b, 'old')} → {_b(b, 'new')}"),
+    "/api/cards/link": ("Połączenie kart (wymiana w panelu)", lambda b: f"karta {_b(b, 'old')} → {_b(b, 'new')}"),
     "/api/card/validity": ("Ważność karty", lambda b: f"karta {_b(b, 'card')}: {_b(b, 'valid_from') or '…'} – {_b(b, 'valid_to') or '…'}"),
     "/api/card/block": ("Blokada karty", lambda b: f"karta {_b(b, 'card')}" + (f", powód: {_b(b, 'reason')}" if _b(b, "reason") else "")
                                                    + (" (wszystkie połączone kontrolery)" if _b(b, "everywhere") == "1" else "")),
@@ -7449,6 +7657,44 @@ tr.past td{opacity:.55}
     <button class="btn ghost" value="cancel" formnovalidate>Anuluj</button>
     <button class="btn danger" value="ok">Zablokuj</button></div>
 </form></dialog>
+<dialog id="cardDlg"><form method="dialog">
+  <h2 id="cardDlgTitle">Zmień numer karty</h2>
+  <p class="small warn-t" style="margin:-6px 0 12px" id="cardDlgWarn"></p>
+  <label class="fld"><span class="lbl">Nowy numer karty - tak, jak widzi go kontroler</span>
+    <input type="text" id="cardDlgNew" inputmode="numeric" placeholder="same cyfry" style="width:100%" oninput="cardHint('#cardDlgNew','#cardDlgHint')"></label>
+  <div class="row" style="margin:6px 0"><button type="button" class="btn ghost sm" onclick="cardPickDenied(this,'#cardDlgNew','#cardDlgHint')">📥 Weź z ostatniej odmowy</button>
+    <span class="muted small">przyłóż nową kartę do czytnika - kontroler ją odrzuci, a panel weźmie jej numer</span></div>
+  <p class="small warn-t" id="cardDlgHint" style="margin:6px 0" hidden></p>
+  <details class="help" style="margin:8px 0"><summary>Jak obliczyć numer z nadruku na karcie</summary><div class="hb">
+    <ol style="margin:4px 0 8px 18px;padding:0">
+      <li>Numer nadrukowany na karcie <b>do 65535</b> - wpisz go bez zmian (bez zer na początku).</li>
+      <li>Większy: podziel go przez <b>65536</b>. Część całkowita to <b>kod obiektu</b>, reszta z dzielenia to <b>numer</b>.</li>
+      <li>Numer w kontrolerze = <b>kod obiektu × 100000 + numer</b>. Przykład: 99999 ÷ 65536 = 1 reszty 34463 → 1 × 100000 + 34463 = <b>134463</b>.</li>
+      <li>Najpewniej bez liczenia: przycisk <b>„Weź z ostatniej odmowy”</b> albo numer z logu przejść.</li>
+    </ol>
+    <div class="row" style="align-items:flex-end;margin:6px 0">
+      <label class="fld"><span class="lbl">Nadruk na karcie</span><input type="text" id="wgdCard" inputmode="numeric" placeholder="np. 99999" oninput="wgCalc('card','wgd')" style="width:150px"></label>
+      <span class="muted" style="padding-bottom:9px">⇄</span>
+      <label class="fld"><span class="lbl">Numer w kontrolerze</span><input type="text" id="wgdCtrl" inputmode="numeric" placeholder="np. 134463" oninput="wgCalc('ctrl','wgd')" style="width:150px"></label>
+      <button type="button" class="btn ghost sm" style="margin-bottom:4px" onclick="if($('#wgdCtrl').value){$('#cardDlgNew').value=$('#wgdCtrl').value;cardHint('#cardDlgNew','#cardDlgHint');}">Użyj ↑</button>
+    </div><p id="wgdMsg" class="small"></p></div></details>
+  <p class="muted small" style="margin:8px 0 14px">Nowa karta dostaje te same drzwi, daty ważności i PIN. Stara karta zostaje usunięta z kontrolera
+    i <b>od razu przestaje otwierać drzwi</b>. Jej dotychczasowe odbicia w czasie pracy i „kto w środku” liczą się tej samej osobie.</p>
+  <div class="row"><div class="spacer"></div>
+    <button class="btn ghost" value="cancel" formnovalidate>Anuluj</button>
+    <button class="btn danger" value="ok">Zmień kartę</button></div>
+</form></dialog>
+<dialog id="replDlg"><form method="dialog">
+  <h2>Czy to wymiana karty?</h2>
+  <p class="muted small" id="replInfo" style="margin:-6px 0 12px"></p>
+  <div id="replList" style="margin:0 0 12px"></div>
+  <p class="muted small" style="margin:0 0 14px">„Wymiana karty” - stara karta traci dostęp (jeśli jest w kontrolerze), nowa przejmuje jej drzwi,
+    daty ważności, PIN i dział, a czas pracy liczy obie karty jako jedną osobę.<br>„Osobna karta” - dodaje nową kartę jak dotąd, stara zostaje bez zmian.</p>
+  <div class="row"><div class="spacer"></div>
+    <button class="btn ghost" value="cancel" formnovalidate>Anuluj</button>
+    <button class="btn ghost" value="add">Osobna karta</button>
+    <button class="btn danger" value="replace">Wymiana karty</button></div>
+</form></dialog>
 <dialog id="corrDlg"><form method="dialog">
   <h2>Korekta czasu pracy</h2>
   <p class="muted small" id="corrWho" style="margin:-6px 0 12px"></p>
@@ -8250,6 +8496,7 @@ function renderUsers(){
     <td>${validityCell(u)}</td>
     <td class="act">${op?`
     <button class="iconbtn" data-id="${esc(u.user_id)}" onclick="editUser(this.dataset.id)">Edytuj / dostęp</button>
+    ${usersUdp?`<button class="iconbtn" data-id="${esc(u.user_id)}" onclick="changeCard(this.dataset.id)" title="Nowy numer karty dla tej osoby - stara karta straci dostęp">🔁 Zmień kartę</button>`:''}
     ${usersUdp?(u.blocked?`<button class="iconbtn" data-card="${esc(u.card)}" onclick="unblockCard(this.dataset.card)">Odblokuj</button>`
       :`<button class="iconbtn del" data-card="${esc(u.card)}" data-label="${esc(u.name||u.card)}" onclick="blockCard(this.dataset.card,this.dataset.label)">Zablokuj</button>`):''}
     <button class="iconbtn del" data-id="${esc(u.user_id)}" data-label="${esc(u.name||u.card)}" onclick="delUser(this.dataset.id,this.dataset.label)">Usuń</button>`:''}</td></tr>`;
@@ -8274,7 +8521,7 @@ function cardWarn(v,masked){const d=wgDigits(v);if(d===null||BigInt(d)<=WG_CN_MA
 function cardCell(card){const d=wgDigits(card);if(d===null||BigInt(d)<=WG_CN_MAX)return esc(card);
   const c=wgCard(d);return c===null?esc(card)
     :`<span class="wgc" title="Na karcie nadrukowany numer ${c} - czytnik zgłasza ją kontrolerowi jako ${d}">${esc(card)}</span>`;}
-function wgCalc(from){const a=$('#wgCard'),b=$('#wgCtrl'),m=$('#wgMsg'),src=from==='card'?a:b,dst=from==='card'?b:a;
+function wgCalc(from,p='wg'){const a=$('#'+p+'Card'),b=$('#'+p+'Ctrl'),m=$('#'+p+'Msg'),src=from==='card'?a:b,dst=from==='card'?b:a;
   if(!src.value.trim()){a.value=b.value='';m.textContent='';return;}
   const d=wgDigits(src.value);
   if(d===null){dst.value='';m.textContent='Wpisz sam numer, bez liter i spacji (do 19 cyfr).';return;}
@@ -8284,17 +8531,54 @@ function wgCalc(from){const a=$('#wgCard'),b=$('#wgCtrl'),m=$('#wgMsg'),src=from
   }else{const c=wgCard(d);dst.value=c===null?'':String(c);
     m.textContent=c===null?'Takiego numeru czytnik nigdy nie zgłosi - pięć ostatnich cyfr może sięgać 65535, a początek 255.'
       :(BigInt(d)<=WG_CN_MAX?'Numer do 65535 jest taki sam po obu stronach.':'Na takiej karcie nadrukowany jest numer '+c+'.');}}
-function cardHint(input='#newCard',hint='#cardHint',masked=false){const v=$(input).value.trim(),h=$(hint);
+function cardHint(input='#newCard',hint='#cardHint',masked=false){const v=$(input).value.trim(),h=$(hint);h.className='small warn-t';
   const zeros=/^0+\d/.test(v)?'Numer zaczyna sie od zer - wpisz go bez nich'+(masked?'.':': '+v.replace(/^0+/,'')):'';
   const txt=[zeros,cardWarn(v,masked)].filter(Boolean).join(' ');
   h.hidden=!txt;h.textContent=txt;}
 async function addCard(){const card=$('#newCard').value.trim(),name=$('#newName').value.trim(),vt=$('#newValidTo').value;
   if(!card){toast('Podaj numer karty','err');return;}
+  // ta sama nazwa co u osoby z inną kartą - zapytaj, czy to wymiana karty
+  let pick=null;
+  if(name){let c=[];try{c=(await api('/api/cards/candidates?'+new URLSearchParams({name,card}))).candidates||[];}catch(e){}
+    if(c.length){pick=await replAsk(card,name,c);if(pick===undefined)return;}}
+  if(pick&&pick.on_ctrl){
+    try{const r=await api('/api/cards/replace',form({user_id:'',old:pick.card,new:card}));toast(r.msg,'ok');
+      $('#newCard').value='';$('#newName').value='';$('#newValidTo').value='';
+      const h=$('#cardHint');h.hidden=!r.warning;h.textContent=r.warning||'';if(r.warning)toast(r.warning,'err');
+      loadUsers();loadPeople();}catch(e){toast('Błąd: '+e.message,'err');loadUsers();}
+    return;}
   try{const r=await api('/api/addcard',form({card,name,valid_to:vt}));toast(r.msg||('Dodano kartę '+card),'ok');
+    if(pick){try{const l=await api('/api/cards/link',form({old:pick.card,new:card}));toast(l.msg,'ok');}
+      catch(e){toast('Dodano kartę, ale nie połączono jej z kartą '+pick.card+': '+e.message,'err');}}
     $('#newCard').value='';$('#newName').value='';$('#newValidTo').value='';
     const h=$('#cardHint');h.hidden=!r.warning;h.textContent=r.warning||'';   // ostrzeżenie zostaje na widoku, toast znika
     if(r.warning)toast(r.warning,'err');
     loadUsers();}catch(e){toast('Błąd: '+e.message,'err');}}
+// pytanie przy dodawaniu: undefined = anuluj, null = osobna karta, obiekt = wymiana tej karty
+function replAsk(card,name,cands){return new Promise(res=>{const dlg=$('#replDlg');dlg.returnValue='';
+  $('#replInfo').textContent='Nazwę „'+name+'” ma już '+(cands.length>1?'kilka kart':'karta')+' w panelu. Dodajesz kartę '+card+'.';
+  $('#replList').innerHTML=cands.map((c,i)=>`<label style="display:block;margin:6px 0"><input type="radio" name="replPick" value="${i}" ${i?'':'checked'}>
+    karta <b>${esc(c.card)}</b> - ${esc(c.name)}${c.dept?' · '+esc(c.dept):''} <span class="small ${c.on_ctrl?'warn-t':'muted'}">${c.on_ctrl?'jest w kontrolerze - straci dostęp':c.on_ctrl===false?'nie ma jej w kontrolerze - tylko połączenie w panelu':'nie sprawdzono kontrolera'}</span></label>`).join('');
+  dlg.onclose=()=>{const v=dlg.returnValue;if(v==='replace'){const r=document.querySelector('input[name=replPick]:checked');res(cands[r?+r.value:0]);}
+    else res(v==='add'?null:undefined);};
+  dlg.showModal();});}
+async function cardPickDenied(b,input,hint){b.disabled=true;
+  try{const d=await api('/api/cards/last-denied');$(input).value=d.card;
+    const h=$(hint);h.hidden=false;h.className='small';h.textContent='✅ Numer '+d.card+' odczytany z kontrolera - jest poprawny, nie trzeba go przeliczać.';
+    toast('Karta '+d.card+' - odmowa na drzwiach #'+d.door+' '+(d.ago<60?d.ago+' s':Math.round(d.ago/60)+' min')+' temu','ok');}
+  catch(e){toast(e.message,'err');}finally{b.disabled=false;}}
+async function changeCard(id){const u=usersCache.find(x=>x.user_id===id)||{};if(!u.card)return;
+  const dlg=$('#cardDlg');dlg.returnValue='';
+  $('#cardDlgTitle').textContent='Zmień kartę: '+(u.name||'ID '+id);
+  $('#cardDlgWarn').textContent='Obecna karta '+u.card+' straci dostęp do wszystkich drzwi.'+(u.blocked?' Karta jest zablokowana - najpierw ją odblokuj.':'');
+  ['#cardDlgNew','#wgdCard','#wgdCtrl'].forEach(s=>$(s).value='');$('#wgdMsg').textContent='';$('#cardDlgHint').hidden=true;
+  dlg.onclose=async()=>{if(dlg.returnValue!=='ok')return;const nw=$('#cardDlgNew').value.trim();
+    if(!nw){toast('Podaj nowy numer karty','err');return;}
+    if(!confirm('Zamienić kartę '+u.card+' na '+nw+'?\n\nKarta '+u.card+' od razu przestanie otwierać drzwi.'))return;
+    try{const r=await api('/api/cards/replace',form({user_id:id,old:u.card,new:nw}));toast(r.msg,'ok');if(r.warning)toast(r.warning,'err');}
+    catch(e){toast('Błąd: '+e.message,'err');}
+    loadUsers();loadPeople();};
+  dlg.showModal();$('#cardDlgNew').focus();}
 async function blockCard(card,label){const dlg=$('#blockDlg');$('#blockDlgTitle').textContent='Zablokuj kartę: '+label;
   $('#blockReason').value='';$('#blockAllRow').hidden=connList.length<2;dlg.returnValue='';
   dlg.onclose=async()=>{if(dlg.returnValue!=='ok')return;
@@ -8424,12 +8708,17 @@ function renderDirectory(){const d=dirData;if(!d)return;
     <td>${p.name?esc(p.name):'<span class="muted">bez nazwy</span>'}</td><td>${p.dept?esc(p.dept):'<span class="muted">—</span>'}</td>
     <td>${p.on.length?esc(p.on.join(', ')):'<span class="muted">brak</span>'}</td>
     <td style="white-space:nowrap">${p.last_seen?esc(p.last_seen):'<span class="muted">—</span>'}</td>
-    <td>${op&&!p.on.length?`<button class="btn danger sm" onclick="forgetCard(this,'${esc(p.card)}')">Usuń ze spisu</button>`:''}</td></tr>`).join('')
+    <td style="white-space:nowrap">${p.replaced_by?`<span class="small muted">🔁 zastąpiona kartą ${esc(p.replaced_by)}</span> `:''}${op&&!p.on.length&&!p.replaced_by?`<button class="btn ghost sm" onclick="linkCard(this,'${esc(p.card)}')" title="Osoba dostała nową kartę - czas pracy i „kto w środku” policzą obie razem">🔁 Zastąpiona kartą…</button> `:''}${op&&!p.on.length?`<button class="btn danger sm" onclick="forgetCard(this,'${esc(p.card)}')">Usuń ze spisu</button>`:''}</td></tr>`).join('')
     :'<tr><td colspan="6" class="muted">'+(all?'Spis jest pusty':'Wszystkie karty ze spisu są zapisane w połączonych kontrolerach')+'</td></tr>';
   const notes=[];
   if(!d.checked.length&&!d.unchecked.length)notes.push('Brak połączonego kontrolera - panel nie wie, które karty są w kontrolerach, więc wszystkie widać jako „brak”.');
   if(d.unchecked.length)notes.push('Nie odczytano listy kart z: '+d.unchecked.join(', ')+' - karty z tych kontrolerów mogą tu wyglądać na nieużywane.');
   $('#dirNote').textContent=notes.join(' ');$('#dirNote').hidden=!notes.length;}
+async function linkCard(b,card){const p=(dirData&&dirData.people.find(x=>x.card===card))||{};
+  const nw=(prompt('Karta '+card+(p.name?' („'+p.name+'”)':'')+' została zastąpiona kartą o numerze:\n\n(numer tak, jak widzi go kontroler - np. z listy użytkowników)')||'').trim();
+  if(!nw)return;b.disabled=true;
+  try{dirData=await api('/api/cards/link',form({old:card,new:nw}));toast(dirData.msg,'ok');renderDirectory();loadPeople();}
+  catch(e){toast('Błąd: '+e.message,'err');b.disabled=false;}}
 async function forgetCard(b,card){const p=(dirData&&dirData.people.find(x=>x.card===card))||{};
   if(!confirm('Usunąć kartę '+card+(p.name?' („'+p.name+'”)':'')+' ze spisu panelu?\n\nZniknie jej nazwa i dział. Wpisy w logu zostaną, ale bez nazwy. Kontrolerów to nie zmienia.'))return;
   b.disabled=true;

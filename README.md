@@ -229,6 +229,22 @@ ACS_HOST=192.168.1.100 ACS_USER=abc ACS_PWD=654321 python3 acs_panel.py
   z roli drzwi (`door_roles`, `reader_sql`); raport liczy wtedy wszystkie drzwi razem. Wymaga co najmniej jednych
   drzwi wejścia i jednych wyjścia. Godzin wejścia nie ustawia się na drzwiach wyjścia (zablokowałyby wyjście).
 
+- **Zmiana numeru karty** (od 2.9.0): przycisk „🔁 Zmień kartę” w tabeli użytkowników (Pracownicy i karty).
+  Strona WWW kontrolera nie zmienia numeru karty, więc panel dodaje nową kartę pod tą samą nazwą (`ACT_ID_312`),
+  kopiuje uprawnienie starej przez UDP `0x50` (drzwi, daty ważności, PIN) i usuwa starą (`ACT_ID_324`) — stara
+  karta od razu przestaje otwierać drzwi. Kolejność kroków: przy błędzie w połowie stara karta dalej działa, a panel
+  mówi, co zostało do zrobienia. Zablokowanej karty nie zmienia (najpierw odblokowanie). Wymaga kanału UDP.
+  Nowy numer sprawdzany przed zapisem: numer nieosiągalny dla czytnika (5 ostatnich cyfr > 65535) i wielokrotność
+  16777216 są odrzucane z podpowiedzią. W oknie: instrukcja liczenia numeru z nadruku (`FC × 100000 + CN`),
+  kalkulator i przycisk „📥 Weź z ostatniej odmowy” — nową kartę przykłada się do czytnika, kontroler ją odrzuca,
+  a panel bierze numer z tej odmowy (`/api/cards/last-denied`, ostatnie 10 min, karta spoza kontrolera).
+  W panelu wymiana zostaje w `card_replacements` (stary → nowy numer): nazwa i dział przechodzą na nowy numer,
+  a czas pracy, „kto w środku” i filtr logu po pracowniku liczą obie karty jako jedną osobę (`card_aliases`).
+  **Pytanie przy dodawaniu karty**: gdy nazwa (bez różnicy wielkości liter i spacji) należy już do innej karty
+  w spisie panelu, panel pyta „Czy to wymiana karty?” — wymiana (stara karta w kontrolerze traci dostęp; karta
+  spoza kontrolera zostaje tylko połączona w panelu) albo osobna karta. W „Spisie kart panelu” karta spoza
+  kontrolerów ma „🔁 Zastąpiona kartą…” (`/api/cards/link`) — dla kart wymienionych przed 2.9.0.
+
 - **Godziny wejścia działów** (od 1.8.0; wcześniej 1.2.0–1.7.0 godziny per drzwi + wyjątek „o każdej porze”):
   w zakładce „Godziny wejścia” zaznacza się drzwi z ograniczeniem, a każdy dział (i wiersz „Pracownicy bez działu”)
   dostaje tryb: w godzinach od–do z dniami tygodnia / o każdej porze / brak wejścia. „Do” ≤ „od” = okno przez
@@ -430,7 +446,8 @@ w `.1`). Ścieżkę zmienia `ACS_DEVICE_LOG`.
 
 ## Do sprawdzenia na sprzęcie
 
-- Brak otwartych punktów z listy 2026-09 — patrz niżej.
+- Zmiana numeru karty (2.9.0) na ACB-004: kopia uprawnienia (`0x50`) dla karty dodanej chwilę wcześniej stroną WWW,
+  usunięcie starej, „Weź z ostatniej odmowy”. Sprawdzone na atrapie czterodrzwiowej (29 testów API + interfejs w jsdom).
 
 ### Sprawdzone na sprzęcie 2026-09-22 (ACB-004)
 
