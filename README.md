@@ -430,12 +430,7 @@ w `.1`). Ścieżkę zmienia `ACS_DEVICE_LOG`.
 
 ## Do sprawdzenia na sprzęcie
 
-- Ostrzeżenie o drzwiach otwartych zbyt długo (2.1.0) na sprzęcie: czy po ponownym połączeniu panelu przy otwartych
-  drzwiach stan odczytany z rekordów `0xB0` zgadza się z rzeczywistością i czy zamknięcie kończy ostrzeżenie.
-  Logika sprawdzona bez sprzętu (71 testów: 44 na funkcjach, 11 na wątku zdarzeń z atrapą UDP, 16 na funkcjach rysujących).
-
-- Czas pracy z par drzwi (2.8.0) na ACB-004: odbicia na drzwiach wejścia i wyjścia w raporcie, „kto w środku”
-  i podglądzie na żywo. Logika sprawdzona na kopii bazy i w interfejsie (jsdom), nie na sprzęcie.
+- Brak otwartych punktów z listy 2026-09 — patrz niżej.
 
 ### Sprawdzone na sprzęcie 2026-09-22 (ACB-004)
 
@@ -444,6 +439,13 @@ w `.1`). Ścieżkę zmienia `ACS_DEVICE_LOG`.
 - **Strażnik dat po zapisie stroną WWW** (zmiany z 2.0.2) na kontrolerze czterodrzwiowym: strona nadpisała daty,
   panel je przywrócił; bajty drzwi zgodne z formularzem (`[1,0,1,0]`) — na ACB-004 strona nie ustawia #3–#4 na 1.
   Lista zadań godzin wejścia zapisuje się na cztery drzwi (4 zadania „na teraz”).
+- **Ostrzeżenie o drzwiach otwartych zbyt długo** (2.1.0, drzwi #1, próg 1 min): ostrzeżenie po minucie i koniec
+  po zamknięciu; drgania styku (kilka 23/24 w tej samej sekundzie) liczone jako jedno otwarcie. Panel rozłączony
+  przy otwartych drzwiach i połączony po 24 min odczytał stan z rekordów `0xB0` — ostrzeżenie od razu przy
+  połączeniu (z właściwą godziną otwarcia), zamknięcie 7 s później je zakończyło.
+- **Czas pracy z par drzwi** (2.8.0, #1 = wejście, #2 = wyjście): log, podgląd na żywo, „kto w środku”
+  i raport liczą odbicie na #2 jako wyjście. Karta usunięta z kontrolera po wejściu zostaje „w środku”
+  (nie może się już odbić przy wyjściu) — do korekty ręcznej albo do wygaśnięcia po 16 h.
 
 ### Sprawdzone na sprzęcie 2026-09-17/18 (ACB-002, V6.62)
 
