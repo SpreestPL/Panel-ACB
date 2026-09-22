@@ -84,7 +84,7 @@ ACS_HOST=192.168.1.100 ACS_USER=abc ACS_PWD=654321 python3 acs_panel.py
 ### Nowe w 2.7.1
 
 - **Zdalne otwarcie nie jest liczone jako osoba w środku.** Wpis „Remote Open” ma w polu karty adres IP
-  otwierającego (192.168.0.4 → `3232235524`), nie numer karty. Kopia logu zapisuje go z pustą kartą,
+  otwierającego (192.168.1.50 → `3232235826`), nie numer karty. Kopia logu zapisuje go z pustą kartą,
   a migracja bazy (`user_version` 5) czyści wcześniejsze wpisy.
 
 ### Nowe w 2.7.0

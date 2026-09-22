@@ -3941,7 +3941,7 @@ _SYNC_LOCK = threading.Lock()
 
 def swipe_card(r):
     """Numer karty wpisu logu. Przy „Remote Open” kontroler wpisuje w pole karty adres IP, z którego
-    przyszło otwarcie (192.168.0.4 -> 3232235524) - to nie karta, więc zapisujemy pustą."""
+    przyszło otwarcie (192.168.1.50 -> 3232235826) - to nie karta, więc zapisujemy pustą."""
     return "" if r["status"].startswith("Remote Open") else card_key(r["card"])
 
 
