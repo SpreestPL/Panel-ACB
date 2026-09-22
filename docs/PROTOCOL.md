@@ -490,7 +490,7 @@ Testy na sprzęcie 2026-09-17/18 (ACB-002 nr 200000002, V6.62, drzwi #1, karta 1
   karty dodane stroną mają `20110101`–`20291231`. **Kod powodu odmowy po dacie „do” to `15`** — ten sam, co „poza
   strefą czasową”, na wejściu i na wyjściu (rekordy 155–156, data „do” ustawiona na wczoraj). Dokumentacyjnego
   kodu `13` ten firmware nie używa, więc po samym logu nie da się odróżnić przeterminowanej karty od strefy czasowej.
-  Odmowa przed datą „ważna od” — niesprawdzona.
+  Przed datą „ważna od” — też kod `15` (test 2026-09-22, ACB-004, drzwi #1 i #2, data „od” = jutro).
 - **Blokada**: te same kroki z bajtami drzwi `[12..15]` = `0`; kontroler odrzuca kartę kodem `6` na wejściu
   i na wyjściu (rekordy 161–162). Po przywróceniu bajtów karta znów wchodzi (kod `1`).
 - **Zapis użytkownika stroną WWW** (`ACT_ID_324`) **zawsze** nadpisuje daty uprawnienia fabrycznymi

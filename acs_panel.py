@@ -74,7 +74,7 @@ from urllib.parse import urlparse, parse_qs, urlencode
 import http.client
 
 
-APP_VERSION = "2.7.1"
+APP_VERSION = "2.8.0"
 
 # Tryb pracy panelu (ACS_MODE):
 #   online  - panel jest stale połączony z kontrolerem i pracuje w tle: przełącza PIN-y kart przy kilku
@@ -146,13 +146,14 @@ AUTOADD_TIMEOUT = 60     # po ilu sekundach tryb auto-dodawania wyłącza się s
 # --- rejestr modeli ----------------------------------------------------------
 # doors  = liczba niezależnych drzwi/przekaźników (sygnatura modelu)
 # verified = czy profil został potwierdzony na fizycznym sprzęcie
-# inout  = przy każdych drzwiach czytnik wejścia i wyjścia - warunek analizy czasu pracy
+# inout  = przy każdych drzwiach czytnik wejścia i wyjścia. Bez tego (ACB-004) czas pracy liczy się z PAR drzwi:
+#          administrator wskazuje w zakładce „Drzwi”, które drzwi są wejściem, a które wyjściem (door_tracking.role)
 MODELS = {
     1: {"name": "ACB-001", "doors": 1, "verified": True, "inout": True,
         "readers": "2 czytniki: wejście + wyjście"},
     2: {"name": "ACB-002", "doors": 2, "verified": True, "inout": True,
         "readers": "4 czytniki: wejście + wyjście na drzwi"},
-    # ACB-004: 4 przekaźniki na 4 drzwi, log podaje tylko wejście (IN) - bez odbicia przy wyjściu
+    # ACB-004: 4 przekaźniki na 4 drzwi, log podaje tylko wejście (IN) - wyjście = odbicie na drzwiach „wyjścia”
     4: {"name": "ACB-004", "doors": 4, "verified": True, "inout": False, "readers": ""},
 }
 
@@ -463,7 +464,7 @@ WG_DIR_IN = 1               # kierunek: 1 = czytnik wejścia, 2 = wyjścia
 # Kody powodu zdarzeń WG - według symulatora uhppoted (ten sam protokół). Na sprzęcie ACB sprawdzone:
 # 1, 6, 7, 15, 20, 23, 24, 25, 44; pozostałe opisy są z dokumentacji WG i mogą się różnić.
 # Kod 15 dostaje na tym sprzęcie także karta po dacie „ważna do” (test 2026-09-17, ACB-002: kod 15
-# na wejściu i na wyjściu) - dokumentacyjnego kodu 13 firmware nie używa. Blokada karty (drzwi = 0)
+# na wejściu i na wyjściu) i przed datą „ważna od” (test 2026-09-22, ACB-004) - kodu 13 firmware nie używa. Blokada karty (drzwi = 0)
 # daje kod 6. Zdarzeń typu 3 (alarmy) ten firmware nie zapisuje - patrz WG_ALARM_REASONS.
 WG_REASONS = {
     1: "przyjęta", 5: "sterowanie z komputera", 6: "brak uprawnienia do drzwi", 7: "brak lub zły PIN",
@@ -2366,7 +2367,9 @@ CREATE TABLE IF NOT EXISTS departments(
 CREATE TABLE IF NOT EXISTS people(
   card TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', dept_id INTEGER);
 CREATE TABLE IF NOT EXISTS door_tracking(
-  ctrl TEXT NOT NULL, door INTEGER NOT NULL, PRIMARY KEY(ctrl, door));
+  ctrl TEXT NOT NULL, door INTEGER NOT NULL, role TEXT NOT NULL DEFAULT '', PRIMARY KEY(ctrl, door));
+-- role (2.8.0): '' = drzwi z czytnikiem wejścia i wyjścia; 'in' / 'out' = drzwi, których każde odbicie jest
+-- wejściem / wyjściem (kontroler z jednym czytnikiem na drzwi, ACB-004)
 CREATE TABLE IF NOT EXISTS swipes(
   ctrl TEXT NOT NULL, record INTEGER NOT NULL, time TEXT NOT NULL,
   card TEXT NOT NULL DEFAULT '', name TEXT NOT NULL DEFAULT '', door INTEGER,
@@ -2480,6 +2483,11 @@ def _db_migrate(con):
         # 2.7.1: „Remote Open” ma w polu karty adres IP otwierającego - pulpit liczył go jako osobę w środku
         con.execute("UPDATE swipes SET card = '' WHERE status LIKE 'Remote Open%'")
         con.execute("PRAGMA user_version = 5")
+    if con.execute("PRAGMA user_version").fetchone()[0] < 6:
+        # 2.8.0: drzwi wejścia / wyjścia na kontrolerze z jednym czytnikiem na drzwi
+        if "role" not in {r[1] for r in con.execute("PRAGMA table_info(door_tracking)")}:
+            con.execute("ALTER TABLE door_tracking ADD COLUMN role TEXT NOT NULL DEFAULT ''")
+        con.execute("PRAGMA user_version = 6")
 
 
 # -- ustawienia panelu (JSON w tabeli settings) --
@@ -3651,41 +3659,80 @@ def entry_hours_save(raw):
 
 
 def tracking_supported(c):
+    """Czy drzwi mają osobny czytnik wejścia i wyjścia (ACB-001, ACB-002). Bez tego czas pracy liczy się
+    z par drzwi - patrz door_roles."""
     return bool(MODELS.get(c.doors, {}).get("inout"))
 
 
+def roles_mode(c):
+    return not tracking_supported(c)
+
+
+def door_roles(c):
+    """Drzwi wejścia / wyjścia na kontrolerze z jednym czytnikiem na drzwi: {nr drzwi: 'in' | 'out'}.
+    Na kontrolerze z czytnikami wejścia i wyjścia - pusty słownik (kierunek podaje sam czytnik)."""
+    if not roles_mode(c):
+        return {}
+    with db() as con:
+        return {r[0]: r[1] for r in con.execute("SELECT door, role FROM door_tracking WHERE ctrl = ?", (ctrl_key(c),))
+                if 1 <= r[0] <= c.doors and r[1] in ("in", "out")}
+
+
 def tracking_reason(c):
-    if c.doors == 4:
-        return ("ACB-004 ma 4 przekaźniki na 4 drzwi i czytnik tylko po stronie wejścia - bez odbicia "
-                "karty przy wyjściu nie da się policzyć czasu pobytu.")
-    return "Analiza czasu pracy wymaga czytnika wejścia i wyjścia przy drzwiach (ACB-001, ACB-002)."
+    """Dlaczego nie da się liczyć czasu pracy (pusty tekst = da się)."""
+    if not roles_mode(c):
+        return "" if tracked_doors(c) else "Żadne drzwi nie liczą czasu pracy - zaznacz je w zakładce „Drzwi”."
+    roles = set(door_roles(c).values())
+    if roles == {"in", "out"}:
+        return ""
+    return ("Ten kontroler ma przy drzwiach tylko czytnik wejścia - wskaż w zakładce „Drzwi”, które drzwi są "
+            "wejściem, a które wyjściem (" + ("brakuje drzwi wyjścia" if roles == {"in"} else
+                                              "brakuje drzwi wejścia" if roles == {"out"} else "nie wybrano żadnych") + ").")
 
 
 def tracked_doors(c):
-    if not tracking_supported(c):
-        return []
+    if roles_mode(c):
+        return sorted(door_roles(c))
     with db() as con:
         return sorted(r[0] for r in con.execute("SELECT door FROM door_tracking WHERE ctrl = ?",
                                                 (ctrl_key(c),)) if 1 <= r[0] <= c.doors)
 
 
+def reader_sql(roles, door_col="s.door", reader_col="s.reader"):
+    """Wyrażenie SQL z kierunkiem odbicia: rola drzwi (pary drzwi), a dla drzwi bez roli czytnik z logu.
+    Wartości w CASE to liczby i stałe 'in'/'out' z door_roles - bez danych od użytkownika."""
+    if not roles:
+        return reader_col
+    return "CASE " + door_col + "".join(f" WHEN {int(d)} THEN '{'out' if r == 'out' else 'in'}'"
+                                        for d, r in sorted(roles.items())) + f" ELSE {reader_col} END"
+
+
 def tracking_state():
     c = require_active()
+    roles = door_roles(c)
     on = set(tracked_doors(c))
     names = {d["n"]: d["name"] for d in c.info.get("doors_list", [])}
-    return {"supported": tracking_supported(c),
-            "reason": "" if tracking_supported(c) else tracking_reason(c),
-            "doors": [{"n": n, "name": names.get(n, ""), "enabled": n in on}
+    reason = tracking_reason(c)
+    return {"supported": True, "mode": "roles" if roles_mode(c) else "readers", "ready": not reason,
+            "reason": reason,
+            "doors": [{"n": n, "name": names.get(n, ""), "enabled": n in on, "role": roles.get(n, "")}
                       for n in range(1, c.doors + 1)]}
 
 
-def tracking_set(door, enabled):
+def tracking_set(door, enabled, role=None):
     c = require_active()
-    if not tracking_supported(c):
-        raise ControllerError(tracking_reason(c))
     door = c._door(door)
+    if roles_mode(c) and role is None:
+        role = "in" if enabled else ""
+    if role not in (None, "", "in", "out"):
+        raise ControllerError("Nieprawidłowa rola drzwi")
+    if role is not None and not roles_mode(c) and role:
+        raise ControllerError("Te drzwi mają czytnik wejścia i wyjścia - wystarczy włączyć analizę czasu pracy")
     with db() as con:
-        if enabled:
+        if role is not None and role:
+            con.execute("INSERT INTO door_tracking(ctrl, door, role) VALUES (?, ?, ?) "
+                        "ON CONFLICT(ctrl, door) DO UPDATE SET role = excluded.role", (ctrl_key(c), door, role))
+        elif role is None and enabled:
             con.execute("INSERT OR IGNORE INTO door_tracking(ctrl, door) VALUES (?, ?)", (ctrl_key(c), door))
         else:
             con.execute("DELETE FROM door_tracking WHERE ctrl = ? AND door = ?", (ctrl_key(c), door))
@@ -3873,6 +3920,7 @@ def log_local(q):
     c = require_active()
     key = ctrl_key(c)
     where, args = _log_filters(key, _b(q, "card"), _b(q, "dept"), _b(q, "from"), _b(q, "to"))
+    rsql = reader_sql(door_roles(c))       # pary drzwi: odbicie na drzwiach wyjścia pokazane jako wyjście
     try:
         page = max(int(_b(q, "page", "1")), 1)
     except ValueError:
@@ -3880,7 +3928,7 @@ def log_local(q):
     with db() as con:
         total = con.execute(f"SELECT COUNT(*) FROM swipes s WHERE {where}", args).fetchone()[0]
         rows = [dict(r) for r in con.execute(
-            f"SELECT s.record, s.time, s.card, s.name, s.door, s.reader, s.granted, s.status, s.reason, "
+            f"SELECT s.record, s.time, s.card, s.name, s.door, {rsql} AS reader, s.granted, s.status, s.reason, "
             f"{PASSED_SQL} AS passed, COALESCE(p.name, '') AS person, d.name AS dept FROM swipes s "
             "LEFT JOIN people p ON p.card = s.card LEFT JOIN departments d ON d.id = p.dept_id "
             f"WHERE {where} ORDER BY s.time DESC, s.record DESC LIMIT ? OFFSET ?",
@@ -3983,13 +4031,13 @@ def _free_days(c, d_from, d_to, cfg):
 def worktime(q, c=None):
     c = c or require_active()
     key = ctrl_key(c)
-    if not tracking_supported(c):
-        raise ControllerError(tracking_reason(c))
+    reason = tracking_reason(c)
+    if reason:
+        raise ControllerError(reason)
     tracked = tracked_doors(c)
-    if not tracked:
-        raise ControllerError("Żadne drzwi nie liczą czasu pracy - zaznacz je w zakładce „Drzwi”.")
+    roles = door_roles(c)
     place = _b(q, "place", "all")
-    if place in ("", "all"):
+    if place in ("", "all") or roles:      # pary drzwi: wejście na jednych, wyjście na drugich - tylko razem
         doors = tracked
     elif place.isdigit() and int(place) in tracked:
         doors = [int(place)]
@@ -4006,12 +4054,13 @@ def worktime(q, c=None):
     # dzień zapasu z obu stron - nocna zmiana zaczęta dzień wcześniej / skończona dzień później
     one = datetime.timedelta(days=1)
     where, args = _log_filters(key, card, dept, (d_from - one).isoformat(), (d_to + one).isoformat())
-    where += (f" AND (s.granted = 1 OR {PASSED_SQL}) AND s.card <> '' AND s.reader IN ('in', 'out')"
+    rsql = reader_sql(roles)
+    where += (f" AND (s.granted = 1 OR {PASSED_SQL}) AND s.card <> '' AND {rsql} IN ('in', 'out')"
               f" AND s.door IN ({','.join('?' * len(doors))})")
     cwhere, cargs = _log_filters(key, card, dept, (d_from - one).isoformat(), (d_to + one).isoformat())
     with db() as con:
         events = [(r["card"], r["time"], r["reader"], None, r["record"]) for r in con.execute(
-            f"SELECT s.card, s.time, s.reader, s.record FROM swipes s WHERE {where}", args + doors)]
+            f"SELECT s.card, s.time, {rsql} AS reader, s.record FROM swipes s WHERE {where}", args + doors)]
         corr = [dict(r) for r in con.execute(
             f"SELECT s.id, s.card, s.time, s.reader, s.note, s.login, s.created FROM work_corrections s "
             f"WHERE {cwhere} AND s.deleted = ''", cargs)]
@@ -4226,44 +4275,51 @@ def _live_state(key):
         return _LIVE.setdefault(key, {"events": collections.deque(maxlen=LIVE_KEEP), "state": "off", "error": ""})
 
 
-def event_text(ev):
+def event_in(ev, roles=None):
+    """Czy odbicie jest wejściem: rola drzwi (pary drzwi, ACB-004), a bez niej czytnik z rekordu."""
+    role = (roles or {}).get(ev["door"])
+    return role == "in" if role else ev["dir"] == WG_DIR_IN
+
+
+def event_text(ev, roles=None):
     reason = WG_REASONS.get(ev["reason"], f"kod {ev['reason']}")
     if ev["type"] == WG_EVENT_SWIPE:
-        where = "wejście" if ev["dir"] == WG_DIR_IN else "wyjście"
+        where = "wejście" if event_in(ev, roles) else "wyjście"
         return where if ev["granted"] else f"odmowa ({where}): {reason}"
     if ev["type"] == 3:
         return f"alarm: {reason}"
     return reason
 
 
-def event_kind(ev):
+def event_kind(ev, roles=None):
     if ev["type"] == 3 or ev["reason"] in WG_ALARM_REASONS:
         return "alarm"
     if ev["type"] == WG_EVENT_SWIPE:
-        return ("in" if ev["dir"] == WG_DIR_IN else "out") if ev["granted"] else "denied"
+        return ("in" if event_in(ev, roles) else "out") if ev["granted"] else "denied"
     return "device"
 
 
-def _live_text(c, ev, card):
+def _live_text(c, ev, card, roles=None):
     """Jak event_text, ale odmowę karty, której nie ma w kontrolerze, nazywa wprost (tylko z listy kart już
     odczytanej - podgląd na żywo nie odpytuje kontrolera o każdą odmowę)."""
     if ev["type"] == WG_EVENT_SWIPE and not ev["granted"] and ev["reason"] in DENY_NOT_STORED:
         hit = _CARDS_NOW.get(ctrl_key(c))
         cards = hit[1] if hit else _CARDS.get(ctrl_key(c))
         if cards is not None and card not in cards:
-            return f"odmowa ({'wejście' if ev['dir'] == WG_DIR_IN else 'wyjście'}): {NOT_STORED_TEXT}"
-    return event_text(ev)
+            return f"odmowa ({'wejście' if event_in(ev, roles) else 'wyjście'}): {NOT_STORED_TEXT}"
+    return event_text(ev, roles)
 
 
-def _live_public(c, ev, names, blocks):
+def _live_public(c, ev, names, blocks, roles=None):
     card = card_key(ev["card"]) if ev["type"] == WG_EVENT_SWIPE else ""
     p = names.get(card) or {}
     doors = {d["n"]: d["name"] for d in c.info.get("doors_list", [])}
     return {"seq": next(_LIVE_SEQ), "ctrl": ctrl_key(c), "record": ev["record"],
             "time": ev["time"].strftime("%Y-%m-%d %H:%M:%S") if ev["time"] else "",
             "card": card, "name": p.get("name", ""), "dept": p.get("dept") or "", "door": ev["door"],
-            "door_name": doors.get(ev["door"], ""), "kind": event_kind(ev), "text": _live_text(c, ev, card),
-            "blocked": card in blocks, "alert": event_kind(ev) in ("denied", "alarm")}
+            "door_name": doors.get(ev["door"], ""), "kind": event_kind(ev, roles),
+            "text": _live_text(c, ev, card, roles), "blocked": card in blocks,
+            "alert": event_kind(ev, roles) in ("denied", "alarm")}
 
 
 def _live_loop(c):
@@ -4282,6 +4338,8 @@ def _live_loop(c):
                 with db() as con:
                     names = _people_map(con)
                     blocks = {r[0] for r in con.execute("SELECT card FROM card_blocks WHERE ctrl = ?", (key,))}
+                roles = door_roles(c)
+                with db() as con:
                     con.executemany(
                         "INSERT OR IGNORE INTO live_events(ctrl, record, time, type, granted, door, dir, card, reason) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -4291,7 +4349,7 @@ def _live_loop(c):
                 for e in evs:
                     if e["time"] is None:
                         continue
-                    pub = _live_public(c, e, names, blocks)
+                    pub = _live_public(c, e, names, blocks, roles)
                     with _LIVE_LOCK:
                         st["events"].append(pub)
                     notify_event(c, e, pub)
@@ -4327,7 +4385,10 @@ def live(q):
 
 
 def presence_supported(c):
-    return tracking_supported(c)
+    return not roles_mode(c) or not tracking_reason(c)
+
+
+DIR_SQL = "CASE dir WHEN 1 THEN 'in' ELSE 'out' END"     # kierunek z live_events (czytnik WG)
 
 
 def presence(c=None):
@@ -4336,16 +4397,18 @@ def presence(c=None):
     na żywo i korekty czasu pracy."""
     c = c or require_active()
     if not presence_supported(c):
-        raise ControllerError(tracking_reason(c).replace("policzyć czasu pobytu", "ustalić, kto jest w środku"))
+        raise ControllerError(tracking_reason(c) + " Bez tego panel nie ustali, kto jest w środku.")
     key = ctrl_key(c)
+    roles = door_roles(c)
     doors = tracked_doors(c) or list(range(1, c.doors + 1))
     since = (datetime.datetime.now() - datetime.timedelta(seconds=MAX_SESSION)).strftime("%Y-%m-%d %H:%M:%S")
     marks = ",".join("?" * len(doors))
     with db() as con:
         rows = con.execute(
-            f"SELECT card, time, reader FROM swipes s WHERE ctrl = ? AND time >= ? AND card <> '' "
-            f"AND reader IN ('in', 'out') AND door IN ({marks}) AND (granted = 1 OR {PASSED_SQL}) "
-            "UNION ALL SELECT card, time, CASE dir WHEN 1 THEN 'in' ELSE 'out' END FROM live_events "
+            f"SELECT card, time, {reader_sql(roles)} AS reader FROM swipes s WHERE ctrl = ? AND time >= ? "
+            f"AND card <> '' AND {reader_sql(roles)} IN ('in', 'out') AND door IN ({marks}) "
+            f"AND (granted = 1 OR {PASSED_SQL}) "
+            f"UNION ALL SELECT card, time, {reader_sql(roles, 'door', DIR_SQL)} FROM live_events "
             f"WHERE ctrl = ? AND time >= ? AND type = 1 AND granted = 1 AND card <> '' AND door IN ({marks}) "
             "UNION ALL SELECT card, time, reader FROM work_corrections WHERE ctrl = ? AND time >= ? AND deleted = ''",
             [key, since, *doors, key, since, *doors, key, since]).fetchall()
@@ -5746,7 +5809,8 @@ ROUTES_POST = {
     "/api/people/assign": (lambda b: person_assign(_b(b, "card"), _b(b, "name"), _b(b, "dept_id")), "operator"),
     "/api/people/assign-bulk": (lambda b: people_assign_bulk(_b(b, "cards"), _b(b, "dept_id")), "operator"),
     "/api/people/forget": (lambda b: person_forget(_b(b, "card")), "operator"),
-    "/api/tracking": (lambda b: tracking_set(_b(b, "door"), _b(b, "enabled") == "1"), "admin"),
+    "/api/tracking": (lambda b: tracking_set(_b(b, "door"), _b(b, "enabled") == "1",
+                                             _b(b, "role") if "role" in b else None), "admin"),
     "/api/doors/open": (lambda b: door_watch_set(_b(b, "door"), _b(b, "enabled") == "1", _b(b, "minutes")), "admin"),
     "/api/entryhours": (lambda b: entry_hours_save(_b(b, "config")), "admin"),
     "/api/addcard": (lambda b: add_card_active(_b(b, "card"), _b(b, "name"), _b(b, "valid_from"), _b(b, "valid_to")), "operator"),
@@ -5828,7 +5892,9 @@ AUDIT_POST = {
     "/api/departments/delete": ("Usunięcie działu", lambda b: _b(b, "id")),
     "/api/people/assign": ("Przypisanie do działu", lambda b: f"karta {_b(b, 'card')} ({_b(b, 'name')}) → "
                                                               f"{_dept_txt(b) or 'bez działu'}"),
-    "/api/tracking": ("Analiza czasu pracy drzwi", lambda b: f"{_door_txt(b)}: {'włączona' if _b(b, 'enabled') == '1' else 'wyłączona'}"),
+    "/api/tracking": ("Analiza czasu pracy drzwi", lambda b: f"{_door_txt(b)}: " + (
+        {"in": "drzwi wejścia", "out": "drzwi wyjścia", "": "nie liczą czasu pracy"}.get(_b(b, "role"), _b(b, "role"))
+        if "role" in b else ("włączona" if _b(b, "enabled") == "1" else "wyłączona"))),
     "/api/entryhours": ("Zapis godzin wejścia", lambda b: ""),
     "/api/addcard": ("Dodanie karty", lambda b: f"karta {_b(b, 'card')} ({_b(b, 'name')})"
                                                  + (f", ważna do {_b(b, 'valid_to')}" if _b(b, "valid_to") else "")),
@@ -7858,7 +7924,9 @@ function renderDoorParams(s){
     <td><input type="text" id="doorName${d.n}" maxlength="32" style="width:100%;min-width:160px" value="${esc(d.name)}" data-orig="${esc(d.name)}" onkeydown="if(event.key==='Enter')saveDoor(${d.n})" ${adm?'':'disabled'}></td>
     <td><input type="number" id="doorDelay${d.n}" min="0" max="255" style="width:90px" value="${esc(delay)}" data-orig="${esc(delay)}" onkeydown="if(event.key==='Enter')saveDoor(${d.n})" ${adm?'':'disabled'}></td>
     <td class="muted small" style="white-space:nowrap">${inout?'wejście / wyjście':'wejście'}</td>
-    <td><label class="small" style="white-space:nowrap"><input type="checkbox" id="track${d.n}" disabled onchange="saveTracking(${d.n},this)"> licz czas pobytu</label></td>
+    <td>${inout?`<label class="small" style="white-space:nowrap"><input type="checkbox" id="track${d.n}" disabled onchange="saveTracking(${d.n},this)"> licz czas pobytu</label>`
+      :`<select id="track${d.n}" disabled onchange="saveTracking(${d.n},this)" title="Każde odbicie karty na tych drzwiach panel liczy jako wejście albo wyjście">
+        <option value="">nie licz</option><option value="in">➡️🚪 odbicie = wejście</option><option value="out">🚪➡️ odbicie = wyjście</option></select>`}</td>
     <td class="act">${adm?`<button class="btn sm" id="doorSave${d.n}" onclick="saveDoor(${d.n})">Zapisz</button>`:''}</td></tr>`;}).join('');
   loadTracking();
   if(!doData||$('#door').classList.contains('active'))loadDoorOpen();
@@ -8036,25 +8104,33 @@ async function loadTracking(){
   renderTracking();
 }
 function renderTracking(){const t=tracking;if(!t)return;
-  t.doors.forEach(d=>{const c=$('#track'+d.n);if(c){c.checked=d.enabled;c.disabled=!t.supported||!can('admin');}});
-  const on=t.doors.filter(d=>d.enabled);
-  $('#trackNote').className='small '+(t.supported?'muted':'warn-t');
+  const roles=t.mode==='roles';
+  t.doors.forEach(d=>{const c=$('#track'+d.n);if(!c)return;
+    if(c.tagName==='SELECT')c.value=d.role||'';else c.checked=d.enabled;c.disabled=!t.supported||!can('admin');});
+  const on=t.doors.filter(d=>d.enabled),ready=t.supported&&t.ready!==false&&on.length>0;
+  const list=r=>on.filter(d=>d.role===r).map(d=>doorLabel(d)).join(', ')||'—';
+  $('#trackNote').className='small '+(ready?'muted':'warn-t');
   $('#trackNote').textContent=!t.supported?'Analiza czasu pracy niedostępna: '+t.reason
+    :roles?(ready?'Czas pracy liczony z par drzwi - wejście: '+list('in')+'; wyjście: '+list('out')+'. Raport jest w zakładce „Czas pracy”.'
+        :'Przy drzwiach jest tylko czytnik wejścia, więc wejście i wyjście to różne drzwi: wskaż, które drzwi są wejściem, a które wyjściem (co najmniej jedne każdego rodzaju).')
+      +' Godzin wejścia nie ustawiaj na drzwiach wyjścia - zablokowałyby wyjście.'
     :on.length?'Czas pracy liczony na drzwiach: '+on.map(d=>doorLabel(d)).join(', ')+'. Raport jest w zakładce „Czas pracy”.'
     :'Zaznacz drzwi, na których pracownicy odbijają kartę przy wejściu i wyjściu - raport pojawi się w zakładce „Czas pracy”.';
   const sel=$('#wtPlace'),cur=sel.value;
-  sel.innerHTML=(on.length>1?'<option value="all">Wszystkie zaznaczone drzwi razem</option>':'')+
+  sel.innerHTML=roles?(ready?'<option value="all">Wejście '+esc(list('in'))+' · wyjście '+esc(list('out'))+'</option>':'')
+    :(on.length>1?'<option value="all">Wszystkie zaznaczone drzwi razem</option>':'')+
     on.map(d=>`<option value="${d.n}">Drzwi ${esc(doorLabel(d))}</option>`).join('');
   if([...sel.options].some(o=>o.value===cur))sel.value=cur;
-  sel.disabled=!on.length;$('#wtBtn').disabled=$('#wtCsvBtn').disabled=$('#wtPrintBtn').disabled=!t.supported||!on.length;
+  sel.disabled=!ready;$('#wtBtn').disabled=$('#wtCsvBtn').disabled=$('#wtPrintBtn').disabled=!ready;
   if(!t.supported)$('#wtInfo').innerHTML='<span class="warn-t">Niedostępne dla tego kontrolera: '+esc(t.reason)+'</span>';
-  else if(!on.length)$('#wtInfo').innerHTML='Żadne drzwi nie liczą czasu pracy. <a href="#" onclick="goTab(\'door\');return false">Zaznacz je w zakładce „Drzwi”</a>.';
+  else if(!ready)$('#wtInfo').innerHTML=(roles?esc(t.reason):'Żadne drzwi nie liczą czasu pracy.')+' <a href="#" onclick="goTab(\'door\');return false">Ustaw to w zakładce „Drzwi”</a>.';
   else if(!$('#wtBody').innerHTML&&!wtBusy)$('#wtInfo').textContent='Wybierz okres i filtry - raport przeliczy się sam.';
 }
-async function saveTracking(n,c){c.disabled=true;
-  try{tracking=await api('/api/tracking',form({door:n,enabled:c.checked?'1':'0'}));
-    toast('Drzwi #'+n+': analiza czasu pracy '+(c.checked?'włączona':'wyłączona'),'ok');}
-  catch(e){c.checked=!c.checked;toast('Błąd: '+e.message,'err');}
+async function saveTracking(n,c){c.disabled=true;const sel=c.tagName==='SELECT';
+  try{tracking=await api('/api/tracking',form(sel?{door:n,role:c.value}:{door:n,enabled:c.checked?'1':'0'}));
+    toast('Drzwi #'+n+': '+(sel?{'in':'drzwi wejścia','out':'drzwi wyjścia','':'nie liczą czasu pracy'}[c.value]
+      :'analiza czasu pracy '+(c.checked?'włączona':'wyłączona')),'ok');}
+  catch(e){if(!sel)c.checked=!c.checked;toast('Błąd: '+e.message,'err');}
   finally{renderTracking();}}
 function fillForms(){const s=lastStatus;
   renderDoorParams(s);
@@ -8484,7 +8560,7 @@ function openLogTab(){loadPeople();loadTracking();loadLog();syncLog().then(s=>{i
 function fmtDur(sec){const m=Math.round(sec/60);return Math.floor(m/60)+' h '+String(m%60).padStart(2,'0')+' min';}
 const hm=t=>t?t.slice(11,16):'';
 let wtData=null,wtSeq=0,wtBusy=false;
-function wtReady(){return !!(tracking&&tracking.supported&&tracking.doors.some(d=>d.enabled));}
+function wtReady(){return !!(tracking&&tracking.supported&&tracking.ready!==false&&tracking.doors.some(d=>d.enabled));}
 async function openWorkTab(){loadPeople();loadWorkSettings();await loadTracking();if(wtReady())loadWorktime();}
 function wtFiltersChanged(){if(wtReady())loadWorktime();}
 async function loadWorktime(){

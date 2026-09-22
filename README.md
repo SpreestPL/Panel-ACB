@@ -222,7 +222,12 @@ ACS_HOST=192.168.1.100 ACS_USER=abc ACS_PWD=654321 python3 acs_panel.py
   wyczyszczeniu dziennika).
 - **Czas pracy** (od 1.1.0; własna zakładka od 1.4.0): w zakładce „Drzwi” zaznacza się drzwi, które liczą
   pobyt; raport w zakładce „Czas pracy” (własne filtry, przelicza się sam po zmianie filtra) łączy odbicia na czytniku wejścia i wyjścia w pobyty (per pracownik, dzień,
-  z rozwinięciem godzin, eksport CSV). Niedostępny dla ACB-004 (czytnik tylko po stronie wejścia).
+  z rozwinięciem godzin, eksport CSV).
+  **Pary drzwi (od 2.8.0, ACB-004)** — przy drzwiach jest tylko czytnik wejścia, więc w zakładce „Drzwi” każde
+  drzwi dostają rolę: *nie licz* / *odbicie = wejście* / *odbicie = wyjście* (`door_tracking.role`, migracja
+  `user_version` 6). Raport, „kto w środku”, lista ewakuacyjna, podgląd na żywo i log przejść biorą kierunek
+  z roli drzwi (`door_roles`, `reader_sql`); raport liczy wtedy wszystkie drzwi razem. Wymaga co najmniej jednych
+  drzwi wejścia i jednych wyjścia. Godzin wejścia nie ustawia się na drzwiach wyjścia (zablokowałyby wyjście).
 
 - **Godziny wejścia działów** (od 1.8.0; wcześniej 1.2.0–1.7.0 godziny per drzwi + wyjątek „o każdej porze”):
   w zakładce „Godziny wejścia” zaznacza się drzwi z ograniczeniem, a każdy dział (i wiersz „Pracownicy bez działu”)
@@ -293,7 +298,7 @@ wystarczy połączyć się z nim, podając jego dane logowania.
 |---|---|---|
 | **ACB-001** | 1 | ✅ w pełni zweryfikowany na sprzęcie |
 | **ACB-002** | 2 (2 przekaźniki, 4 czytniki: wejście + wyjście na drzwi) | ✅ zweryfikowany na sprzęcie (odczyty, użytkownicy, auto-dodawanie, nazwa drzwi #2); zdalne otwieranie i hasła drzwi #2 niesprawdzone fizycznie |
-| **ACB-004** | 4 | ✅ zweryfikowany na sprzęcie (nr 400000004): odczyty, nazwy / czasy / hasła drzwi #3–#4, użytkownicy z uprawnieniami do drzwi, auto-dodawanie; zdalne otwieranie niesprawdzone fizycznie |
+| **ACB-004** | 4 | ✅ zweryfikowany na sprzęcie (nr 400000004): odczyty, nazwy / czasy / hasła drzwi #3–#4, użytkownicy z uprawnieniami do drzwi, auto-dodawanie, zdalne otwieranie drzwi #1–#4 (2026-09-22) |
 
 > **Uwaga — brak szyfrowania HTTPS w kontrolerach:** kontrolery **ACB-001**, **ACB-002** i **ACB-004**
 > nie obsługują szyfrowania HTTPS (tylko czysty HTTP), więc ruch panel → kontroler zawsze jest nieszyfrowany.
@@ -425,12 +430,20 @@ w `.1`). Ścieżkę zmienia `ACS_DEVICE_LOG`.
 
 ## Do sprawdzenia na sprzęcie
 
-- Zdalne otwieranie drzwi #2–#4.
-- Odmowa karty przed datą „ważna od” (kod powodu). Po dacie „ważna do” sprawdzone — kod 15.
-- Zachowania panelu na kontrolerze czterodrzwiowym (ACB-004) po zmianach z 2.0.2.
 - Ostrzeżenie o drzwiach otwartych zbyt długo (2.1.0) na sprzęcie: czy po ponownym połączeniu panelu przy otwartych
   drzwiach stan odczytany z rekordów `0xB0` zgadza się z rzeczywistością i czy zamknięcie kończy ostrzeżenie.
   Logika sprawdzona bez sprzętu (71 testów: 44 na funkcjach, 11 na wątku zdarzeń z atrapą UDP, 16 na funkcjach rysujących).
+
+- Czas pracy z par drzwi (2.8.0) na ACB-004: odbicia na drzwiach wejścia i wyjścia w raporcie, „kto w środku”
+  i podglądzie na żywo. Logika sprawdzona na kopii bazy i w interfejsie (jsdom), nie na sprzęcie.
+
+### Sprawdzone na sprzęcie 2026-09-22 (ACB-004)
+
+- **Zdalne otwieranie drzwi #2–#4** (`0x40`): przekaźniki zadziałały, rekordy z kodem 44 na właściwych drzwiach.
+- **Karta przed datą „ważna od”**: odmowa kodem **15** — tym samym, co po dacie „ważna do” i poza strefą czasową.
+- **Strażnik dat po zapisie stroną WWW** (zmiany z 2.0.2) na kontrolerze czterodrzwiowym: strona nadpisała daty,
+  panel je przywrócił; bajty drzwi zgodne z formularzem (`[1,0,1,0]`) — na ACB-004 strona nie ustawia #3–#4 na 1.
+  Lista zadań godzin wejścia zapisuje się na cztery drzwi (4 zadania „na teraz”).
 
 ### Sprawdzone na sprzęcie 2026-09-17/18 (ACB-002, V6.62)
 
