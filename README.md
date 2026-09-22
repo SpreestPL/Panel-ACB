@@ -63,6 +63,64 @@ ACS_HOST=192.168.1.100 ACS_USER=abc ACS_PWD=654321 python3 acs_panel.py
 
 ## Funkcje
 
+### Nowe w 2.9.0
+
+- **Zmiana numeru karty** („🔁 Zmień kartę” w tabeli użytkowników): nowa karta pod tą samą nazwą, kopia
+  uprawnienia starej (UDP `0x50`: drzwi, daty ważności, PIN) i usunięcie starej — stara karta od razu traci dostęp.
+  W oknie instrukcja liczenia numeru z nadruku (`FC × 100000 + CN`), kalkulator i „📥 Weź z ostatniej odmowy”.
+  Wymiana zostaje w `card_replacements`: czas pracy, „kto w środku” i filtr logu liczą obie karty jako jedną osobę.
+- **Pytanie „Czy to wymiana karty?”** przy dodawaniu karty z nazwą osoby, która ma już inną kartę w spisie panelu;
+  w „Spisie kart panelu” — „🔁 Zastąpiona kartą…” dla kart wymienionych wcześniej.
+  Szczegóły niżej w opisie funkcji („Zmiana numeru karty”).
+
+### Nowe w 2.8.0
+
+- **Czas pracy z par drzwi** (kontroler z jednym czytnikiem na drzwi, np. ACB-004): w zakładce „Drzwi” każde
+  drzwi dostają rolę *nie licz* / *odbicie = wejście* / *odbicie = wyjście* (`door_tracking.role`, `user_version` 6).
+  Raport czasu pracy, „kto w środku”, lista ewakuacyjna, podgląd na żywo i log przejść biorą kierunek z roli drzwi.
+- Wyniki testów na sprzęcie ACB-004 (zdalne otwarcie #2–#4, kod 15 przed datą „ważna od”, przywracanie dat
+  po zapisie stroną WWW) — rozdział [Do sprawdzenia na sprzęcie](#do-sprawdzenia-na-sprzęcie).
+
+### Nowe w 2.7.1
+
+- **Zdalne otwarcie nie jest liczone jako osoba w środku.** Wpis „Remote Open” ma w polu karty adres IP
+  otwierającego (192.168.0.4 → `3232235524`), nie numer karty. Kopia logu zapisuje go z pustą kartą,
+  a migracja bazy (`user_version` 5) czyści wcześniejsze wpisy.
+
+### Nowe w 2.7.0
+
+- **Powód odmowy w logu przejść** — kod z rekordu UDP `0xB0` (strona WWW kontrolera podaje tylko „Denied”),
+  kolumna `swipes.reason` (`user_version` 4), uzupełniana po każdym pobraniu logu. Przy karcie, której nie ma
+  w kontrolerze: „karta nie jest zapisana w tym kontrolerze” (nazwa pochodzi ze wspólnego spisu kart panelu).
+- **„Spis kart panelu”** (Pracownicy i karty): zapamiętane karty z informacją, w których połączonych
+  kontrolerach są zapisane, i usuwanie ze spisu kart spoza kontrolerów.
+
+### Nowe w 2.6.2
+
+- **Zmiana IP w „Parametrach sieciowych”** sprawdza adres tak jak „Ustaw adres IP” (sieć komputera z panelem,
+  brama, wolny adres); panel sam łączy się pod nowym adresem i poprawia listę zapisanych kontrolerów.
+
+### Nowe w 2.6.1
+
+- Kontroler z loginem i hasłem innym niż podane i fabryczne skan pokazuje jako „nieznany - podaj login i hasło
+  kontrolera” — to złe dane logowania, nie nieobsługiwany model.
+- Bez udanego logowania numer urządzenia pochodzi z odpowiedzi UDP, więc „Ustaw adres IP” działa także wtedy.
+
+### Nowe w 2.6.0
+
+- **Czyszczenie logów** przez administratora („Ustawienia panelu” → „Czyszczenie logów”): log przejść, zdarzenia
+  na żywo, dziennik działań, historia powiadomień; całość albo wpisy sprzed wybranego dnia. Czyści tylko bazę
+  panelu (firmware kontrolera nie ma czyszczenia logu), granica w `sync_state.cleared_to`, kopia bazy przed
+  usunięciem. Szczegóły niżej w opisie funkcji.
+
+### Nowe w 2.5.0
+
+- **Wyszukiwanie kontrolerów spoza podsieci**: rozgłoszeniowe UDP `0x94` znajduje też kontroler z adresem
+  z innej sieci (np. po resecie). Taki kontroler odpowiada, ale HTTP i UDP unicast do niego nie działają,
+  więc panel dopasowuje go po numerze urządzenia (szczegóły w [docs/PROTOCOL.md](docs/PROTOCOL.md)).
+- **„Ustaw adres IP”** przy kontrolerze w wynikach skanu: rozgłoszeniowe `0x96` (IP, maska, brama), potem
+  sprawdzenie nowego adresu ponownym `0x94`. **Jeszcze nie sprawdzone na sprzęcie.**
+
 ### Nowe w 2.4.0
 
 - **Masowe dodawanie kart z nazwą właściciela** (zakładka „Pracownicy i karty” → „Dodaj wiele kart naraz”).
