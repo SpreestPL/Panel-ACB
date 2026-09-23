@@ -74,7 +74,7 @@ from urllib.parse import urlparse, parse_qs, urlencode
 import http.client
 
 
-APP_VERSION = "2.9.0"
+APP_VERSION = "2.10.0"
 
 # Tryb pracy panelu (ACS_MODE):
 #   online  - panel jest stale połączony z kontrolerem i pracuje w tle: przełącza PIN-y kart przy kilku
@@ -6706,7 +6706,8 @@ ASSETS = {"/logo.png": LOGO_PNG, "/favicon.png": ICON_PNG, "/favicon.ico": ICON_
 
 
 PAGE = r"""<!doctype html><html lang="pl"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0c111a">
 <title>Spreest - Panel ACB</title>
 <link rel="icon" type="image/png" href="/favicon.png">
 <link rel="apple-touch-icon" href="/icon-180.png">
@@ -6730,6 +6731,9 @@ input[type=text],input[type=password],input[type=number],input[type=date],input[
 input:focus,select:focus{border-color:var(--acc)}
 input:disabled{opacity:.45}
 input[type=checkbox]{accent-color:var(--acc)}
+textarea{background:var(--in);border:1px solid var(--line);color:var(--fg);padding:8px 10px;border-radius:8px;outline:none;max-width:100%}
+textarea:focus{border-color:var(--acc)}
+input,button,select,textarea,label,summary,.btn,.iconbtn,.chip{touch-action:manipulation}
 
 /* --- górny pasek: połączenie --- */
 header{position:sticky;top:0;z-index:6;display:flex;align-items:center;gap:16px;padding:9px 20px;background:var(--side);border-bottom:1px solid var(--line)}
@@ -6888,17 +6892,93 @@ tr.past td{opacity:.55}
 .corr{color:var(--link);cursor:help}
 .kvgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(200px,100%),1fr));gap:10px 14px}
 
+/* --- tablet: menu jako pasek zakładek u góry --- */
 @media (max-width:900px){
-  header{position:static;flex-wrap:wrap;padding:10px 16px}
-  .brand{width:auto;min-width:0}
-  .conn{flex-basis:100%;flex-wrap:wrap}
+  header{position:static;flex-wrap:wrap;gap:10px 12px;padding:10px 16px}
+  .brand{width:auto;min-width:0;flex:1;order:1}
+  .who{order:2;margin-left:auto;flex:none}
+  .conn{order:3;flex-basis:100%;flex-wrap:wrap}
   .conn .cclock{border-left:none;padding-left:0;text-align:left}
   .shell{display:block}
-  nav{position:sticky;top:0;z-index:5;width:auto;height:auto;flex-direction:row;overflow-x:auto;padding:8px 12px;border-right:none;border-bottom:1px solid var(--line)}
-  nav button{width:auto;white-space:nowrap;padding:7px 11px}
+  nav{position:sticky;top:0;z-index:5;width:auto;height:auto;flex-direction:row;overflow-x:auto;overflow-y:hidden;
+    -webkit-overflow-scrolling:touch;scrollbar-width:none;padding:8px 12px;border-right:none;border-bottom:1px solid var(--line)}
+  nav::-webkit-scrollbar{display:none}
+  nav button{width:auto;white-space:nowrap;padding:9px 12px;scroll-margin:0 14px}
+  nav button.active{box-shadow:inset 0 -3px 0 var(--acc)}
   nav .navctl,nav .navsec{display:none!important}
   main{padding:16px 16px 60px}
-  .who{flex-basis:100%;justify-content:flex-end}
+  /* 16 px w polach - inaczej iPhone przybliża stronę przy dotknięciu pola i skala już nie wraca */
+  input[type=text],input[type=password],input[type=number],input[type=date],input[type=time],
+  input[type=datetime-local],input[type=email],select,textarea{font-size:16px}
+}
+
+/* --- telefon --- */
+@media (max-width:640px){
+  header{gap:8px 10px;padding:8px 12px}
+  .brand{font-size:14px;gap:9px}
+  .brand .logo{height:26px}
+  .brand .logo+div{padding-left:9px}
+  .brand .ver{font-size:10px}
+  .who{gap:6px}
+  .who .wn{max-width:34vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+  .conn{gap:6px 10px;padding:7px 8px 7px 12px}
+  .conn .cname{font-size:15px}
+  .conn .cclock{flex-basis:100%}
+  .conn .cact{flex:1;flex-wrap:wrap}
+  .conn .cact .btn{flex:1}
+  #ctrlSwitch{max-width:none;flex:1 1 100%}
+  main{padding:12px 12px 56px}
+  h1{font-size:19px}
+  .card{padding:14px 12px;border-radius:10px}
+  .ph{gap:10px;margin-bottom:14px}
+  .ph>div{min-width:100%}
+  .ph .btn{flex:1 1 auto}
+  .toolbar{display:grid;grid-template-columns:1fr;gap:10px;padding:10px}
+  .toolbar .btn{width:100%}
+  .toolbar input,.toolbar select{width:100%!important;min-width:0!important}
+  .form{gap:10px}
+  .form>label.fld,.form>div{min-width:0!important}
+  .cols2{gap:12px}
+  /* palec zamiast kursora: większe cele dotknięcia */
+  .btn{padding:10px 14px;min-height:42px}
+  .btn.sm{padding:7px 12px;min-height:36px}
+  .iconbtn{padding:7px 12px;font-size:13px;min-height:34px}
+  input[type=checkbox]{width:18px;height:18px;vertical-align:-4px}
+  .doortile{padding:14px}
+  .doortile .btn{min-height:48px;font-size:15px}
+  .live{max-height:none}
+  .live .ev{grid-template-columns:50px 20px 1fr;gap:4px 6px;padding:7px 8px}
+  .live .ev>:nth-child(4){grid-column:3;text-align:left!important}
+  .kvl dd{text-align:left}
+  .pager{gap:6px}
+  .pager .btn{flex:1 1 auto}
+  #wgCard,#wgCtrl,#wgdCard,#wgdCtrl,#resetConfirm{width:100%!important}
+  .row>label.fld{flex:1 1 140px;min-width:0}
+  dialog{width:100%;max-width:100%;max-height:92vh;margin:auto auto 0;overflow-y:auto;
+    border-radius:14px 14px 0 0;padding:16px 14px calc(16px + env(safe-area-inset-bottom))}
+  .authview{padding:16px 12px}
+  .authbox{padding:20px 16px}
+
+  /* tabele jako kafelki - nagłówek kolumny wędruje przed wartość (etykiety dopisuje skrypt) */
+  body.stack .tw{overflow-x:visible}
+  body.stack main table{display:block;width:100%;margin:0}
+  body.stack main thead{display:none}
+  body.stack main tbody{display:block}
+  body.stack main tr{display:block;background:var(--in);border:1px solid var(--line);border-radius:10px;padding:6px 10px;margin:0 0 8px}
+  body.stack main tr.cur{background:var(--ok-soft);border-color:var(--ok-line)}
+  body.stack main tr.grant{box-shadow:inset 3px 0 0 var(--ok)}
+  body.stack main tr.deny{box-shadow:inset 3px 0 0 var(--warn)}
+  body.stack main tr.grp{background:var(--card)}
+  body.stack main td{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px;border:none;padding:5px 0;
+    font-size:13px;text-align:left!important;white-space:normal!important;background:none!important;box-shadow:none!important}
+  body.stack main td+td{border-top:1px dotted var(--line2)}
+  body.stack main td::before{content:attr(data-l);flex:0 0 38%;max-width:38%;color:var(--mut);font-size:12px}
+  body.stack main td:not([data-l])::before{content:none}
+  body.stack main td:empty{display:none}
+  body.stack main td[colspan],body.stack main tr.grp td{display:block}
+  body.stack main td>input:not([type=checkbox]),body.stack main td>select{flex:1 1 140px;width:auto!important;min-width:0!important}
+  body.stack main tr.wtd>td{padding:4px 0 6px}
+  body.stack main tr.wtd table tr{background:var(--card)}
 }
 </style></head><body class="locked">
 <div id="authView" class="authview">
@@ -7815,7 +7895,36 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   if(b.dataset.tab==='accounts')accLoad();
   if(b.dataset.tab==='settings'){maintLoad();lgLoad();}
   try{history.replaceState(null,'','#'+b.dataset.tab);}catch(e){}
+  if(mqNav.matches){try{b.scrollIntoView({inline:'center',block:'nearest'});}catch(e){}window.scrollTo(0,0);}
 });
+
+// --- telefon: pasek zakładek zamiast menu bocznego i tabele w postaci kafelków ---
+// Kafelki potrzebują nazwy kolumny przy każdej wartości - CSS bierze ją z atrybutu data-l,
+// który dopisujemy tu z nagłówka tabeli (wiersze rysuje skrypt w kilkunastu miejscach).
+const mqNav=window.matchMedia('(max-width:900px)'),mqStack=window.matchMedia('(max-width:640px)');
+function labelTables(){
+  if(!mqStack.matches)return;
+  document.querySelectorAll('main table').forEach(t=>{
+    const hr=t.tHead&&t.tHead.rows[0];if(!hr)return;
+    const hs=[...hr.cells].map(c=>c.textContent.trim());
+    for(const tb of t.tBodies)for(const tr of tb.rows){
+      let i=0;
+      for(const td of tr.cells){
+        const span=td.colSpan||1,h=span>1?'':hs[i];i+=span;
+        if(h)td.setAttribute('data-l',h);else td.removeAttribute('data-l');
+      }
+    }
+  });
+  document.body.classList.add('stack');
+}
+let stackTimer=null;
+function stackSoon(){if(!mqStack.matches)return;clearTimeout(stackTimer);stackTimer=setTimeout(labelTables,60);}
+try{
+  new MutationObserver(stackSoon).observe(document.body,{childList:true,subtree:true});
+  const mqOn=()=>{if(mqStack.matches)labelTables();else document.body.classList.remove('stack');};
+  mqStack.addEventListener?mqStack.addEventListener('change',mqOn):mqStack.addListener(mqOn);
+  mqOn();
+}catch(e){}
 function toast(m,k){const t=$('#toast');t.textContent=m;t.className='show '+(k||'');setTimeout(()=>t.className='',3800);}
 function esc(s){return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function api(p,o){o=Object.assign({},o||{});o.headers=Object.assign({'X-ACB':'1'},o.headers||{});

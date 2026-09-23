@@ -63,6 +63,21 @@ ACS_HOST=192.168.1.100 ACS_USER=abc ACS_PWD=654321 python3 acs_panel.py
 
 ## Funkcje
 
+### Nowe w 2.10.0
+
+- **Widok na telefonie.** Panel jest teraz wygodny na małym ekranie:
+  - **tabele jako kafelki** — poniżej 640 px każdy wiersz (użytkownicy, log przejść, spis kart, godziny działów,
+    czas pracy, dziennik działań…) zamienia się w kafelek „nazwa kolumny → wartość”, bez przewijania w bok;
+    nazwy kolumn dopisuje skrypt z nagłówka tabeli (atrybut `data-l`), a układ włącza klasa `stack` na `<body>`,
+    więc przy wyłączonym skrypcie zostaje dotychczasowa tabela z przewijaniem,
+  - **pola formularzy 16 px** — iPhone nie przybliża strony przy dotknięciu pola (po takim przybliżeniu skala już nie wraca),
+  - **większe cele dotknięcia** (przyciski min. 42 px, przyciski ikonowe i pola wyboru powiększone),
+  - **górny pasek** mieści się w dwóch liniach: nazwa panelu i konto w pierwszej, połączenie z kontrolerem w drugiej,
+  - **pasek zakładek** przewija się płynnie, chowa suwak i sam przewija się do klikniętej zakładki (podkreślenie zamiast paska z boku),
+  - **okna** (blokada karty, zmiana karty, korekta, konto) otwierają się jak arkusz przy dolnej krawędzi, z własnym przewijaniem,
+  - filtry i paski narzędzi układają się w jedną kolumnę na całą szerokość, a pola o sztywnej szerokości (przelicznik numeru karty,
+    potwierdzenie resetu) rozciągają się do szerokości ekranu.
+
 ### Nowe w 2.9.0
 
 - **Zmiana numeru karty** („🔁 Zmień kartę” w tabeli użytkowników): nowa karta pod tą samą nazwą, kopia
