@@ -75,8 +75,8 @@ Są dwie drogi:
 
 1. **Własny certyfikat w panelu** — `ACS_TLS_CERT` i `ACS_TLS_KEY` (pliki PEM). Certyfikat musisz zdobyć
    i odnawiać sam.
-2. **Serwer HTTPS przed panelem (zalecane)** — np. [Caddy](https://caddyserver.com/). Tak działa panel na naszym
-   serwerze: panel słucha tylko na `127.0.0.1`, Caddy przyjmuje połączenia z sieci, sam wystawia i odnawia
+2. **Serwer HTTPS przed panelem (zalecane)** — np. [Caddy](https://caddyserver.com/). Tak mamy wystawione panele WWW
+   na naszym serwerze: aplikacja słucha tylko na `127.0.0.1`, Caddy przyjmuje połączenia z sieci, sam wystawia i odnawia
    certyfikat i przekazuje ruch do panelu.
 
 ### Przykład: Caddy przed panelem
