@@ -106,15 +106,48 @@ https://192.168.1.10:8088 {
 
 Po zmianie: `sudo systemctl reload caddy`. Panel otwierasz pod **https://192.168.1.10:8088**.
 
-- `tls internal` to certyfikat z wewnętrznego urzędu Caddy. Przeglądarka pokaże ostrzeżenie, dopóki nie
-  zainstalujesz na komputerach użytkowników certyfikatu głównego Caddy (`sudo caddy trust` na serwerze; plik
-  `root.crt` znajdziesz w katalogu danych Caddy, np. `/var/lib/caddy/.local/share/caddy/pki/authorities/local/`).
+- `tls internal` to certyfikat z wewnętrznego urzędu Caddy — **trzeba go wgrać na każde urządzenie**, z którego
+  otwierasz panel (zob. niżej „Wgranie certyfikatu na urządzenia”).
 - Masz domenę wskazującą na serwer — wpisz ją zamiast adresu IP i usuń `tls internal`: Caddy sam pobierze
   certyfikat Let's Encrypt (wymaga dostępu z internetu do portu 80 lub 443 albo wyzwania DNS).
 - Nie zmieniaj nagłówka `Host` w `reverse_proxy` (domyślnie Caddy go przekazuje) — panel porównuje go
   z nagłówkiem `Origin` i odrzuca zapytania, w których się różnią.
 - Adres panelu na innym porcie niż 8088 (np. `https://192.168.1.10:8443`) też zadziała — wtedy `bind` nie jest
   potrzebny.
+
+### Wgranie certyfikatu na urządzenia
+
+Przy `tls internal` (i przy własnym certyfikacie z `ACS_TLS_CERT`, jeśli nie pochodzi z publicznego urzędu)
+przeglądarka nie zna wystawcy certyfikatu. **Na każdym urządzeniu, z którego korzystasz z panelu** — komputer
+w recepcji, komputer kadr, laptop kierownika, telefon — trzeba raz zainstalować certyfikat główny jako zaufany.
+Bez tego przeglądarka pokazuje „Połączenie nie jest prywatne”: da się to kliknąć „Przejdź dalej”, ale wtedy nie
+widać różnicy między panelem a podszywającą się pod niego stroną, a część funkcji (np. powiadomienia przeglądarki)
+nie działa.
+
+Który plik: **certyfikat główny** Caddy `root.crt` (ważny 10 lat) — nie certyfikat pośredni ani certyfikat strony,
+które Caddy odnawia sam co kilka dni. Na serwerze:
+
+```bash
+sudo cp /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt ~/panel-acb-root.crt
+```
+
+(ścieżka zależy od instalacji Caddy; `sudo caddy trust` instaluje certyfikat tylko na samym serwerze). Plik
+przenieś na urządzenia (pendrive, mail, udział sieciowy) i zainstaluj:
+
+| System | Instalacja |
+|---|---|
+| Windows | dwuklik `.crt` → *Zainstaluj certyfikat* → *Komputer lokalny* → *Umieść wszystkie certyfikaty w następującym magazynie* → **Zaufane główne urzędy certyfikacji**; albo w wierszu poleceń jako administrator: `certutil -addstore -f Root panel-acb-root.crt`. Chrome i Edge korzystają z tego magazynu. |
+| macOS | dwuklik → pęk kluczy **System** → na certyfikacie *Pokaż informacje* → *Zaufanie* → **Zawsze ufaj**; albo `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain panel-acb-root.crt` |
+| Linux (Ubuntu/Debian) | `sudo cp panel-acb-root.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates`; Chrome/Chromium na Linuksie ma własną bazę — *Ustawienia → Prywatność i bezpieczeństwo → Zabezpieczenia → Zarządzaj certyfikatami → Urzędy → Importuj* |
+| Firefox (każdy system) | jeśli po instalacji w systemie nadal ostrzega: *Ustawienia → Prywatność i bezpieczeństwo → Certyfikaty → Wyświetl certyfikaty → Organy certyfikacji → Importuj*, zaznacz „zaufaj przy identyfikacji witryn” |
+| Android | *Ustawienia → Bezpieczeństwo → Więcej ustawień / Szyfrowanie i dane logowania → Zainstaluj certyfikat → Certyfikat CA* (nazwy menu różnią się między producentami) |
+| iPhone / iPad | otwórz plik (np. z maila) → *Ustawienia → Pobrany profil → Instaluj*, potem **koniecznie** *Ustawienia → Ogólne → To urządzenie → Ustawienia zaufania certyfikatów* → włącz przy certyfikacie Caddy |
+
+Po instalacji zamknij i otwórz przeglądarkę ponownie. Nowe urządzenie w firmie = ta sama instalacja; po ponownej
+instalacji Caddy albo skasowaniu jego katalogu danych powstaje nowy certyfikat główny i trzeba go rozesłać od nowa.
+
+Certyfikatu nie trzeba wgrywać, gdy panel ma certyfikat z publicznego urzędu: Let's Encrypt na własnej domenie
+albo certyfikat Tailscale (niżej) — takie przeglądarki znają od razu.
 
 ### Dostęp zdalny przez tunel VPN (np. Tailscale)
 
