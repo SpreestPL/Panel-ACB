@@ -61,6 +61,107 @@ Konfiguracja przez zmienne środowiskowe (opcjonalnie):
 ACS_HOST=192.168.1.100 ACS_USER=abc ACS_PWD=654321 python3 acs_panel.py
 ```
 
+## HTTPS i dostęp zdalny
+
+**Na ten moment HTTPS trzeba skonfigurować we własnym zakresie.** Panel sam z siebie działa po czystym HTTP
+i nie wystawia certyfikatu. Dopóki otwierasz go tylko na tym samym komputerze (`http://127.0.0.1:8088`),
+ruch nie wychodzi do sieci. Gdy panel ma być dostępny z innych komputerów, udostępnij go po HTTPS — inaczej
+hasła do panelu, numery kart i polecenia otwarcia drzwi idą w sieci otwartym tekstem.
+
+Odcinek **panel → kontroler** zawsze zostaje nieszyfrowany (kontrolery ACB nie obsługują HTTPS) — HTTPS chroni
+tylko drogę przeglądarka → panel. Kontroler trzymaj w odizolowanej sieci (zob. „Uwagi bezpieczeństwa”).
+
+Są dwie drogi:
+
+1. **Własny certyfikat w panelu** — `ACS_TLS_CERT` i `ACS_TLS_KEY` (pliki PEM). Certyfikat musisz zdobyć
+   i odnawiać sam.
+2. **Serwer HTTPS przed panelem (zalecane)** — np. [Caddy](https://caddyserver.com/). Tak działa panel na naszym
+   serwerze: panel słucha tylko na `127.0.0.1`, Caddy przyjmuje połączenia z sieci, sam wystawia i odnawia
+   certyfikat i przekazuje ruch do panelu.
+
+### Przykład: Caddy przed panelem
+
+Panel uruchom na `127.0.0.1` z `ACS_TRUST_PROXY=1` (panel bierze wtedy adres klienta z `X-Forwarded-For`,
+do dziennika i blokady logowania, i ustawia ciasteczko sesji jako `Secure`):
+
+```bash
+ACS_BIND=127.0.0.1 ACS_PORT=8088 ACS_TRUST_PROXY=1 ACS_NO_BROWSER=1 python3 acs_panel.py
+```
+
+`/etc/caddy/Caddyfile` (adres `192.168.1.10` zamień na adres komputera z panelem w Twojej sieci):
+
+```caddyfile
+{
+	# Panel jest na wysokim porcie — bez przekierowań z portu 80
+	auto_https disable_redirects
+}
+
+# Spreest - Panel ACB — HTTPS w sieci lokalnej
+https://192.168.1.10:8088 {
+	bind 192.168.1.10          # Caddy zajmuje port tylko na adresie LAN,
+	tls internal               # panel trzyma ten sam port na 127.0.0.1 — bez konfliktu
+	reverse_proxy 127.0.0.1:8088
+}
+```
+
+Po zmianie: `sudo systemctl reload caddy`. Panel otwierasz pod **https://192.168.1.10:8088**.
+
+- `tls internal` to certyfikat z wewnętrznego urzędu Caddy. Przeglądarka pokaże ostrzeżenie, dopóki nie
+  zainstalujesz na komputerach użytkowników certyfikatu głównego Caddy (`sudo caddy trust` na serwerze; plik
+  `root.crt` znajdziesz w katalogu danych Caddy, np. `/var/lib/caddy/.local/share/caddy/pki/authorities/local/`).
+- Masz domenę wskazującą na serwer — wpisz ją zamiast adresu IP i usuń `tls internal`: Caddy sam pobierze
+  certyfikat Let's Encrypt (wymaga dostępu z internetu do portu 80 lub 443 albo wyzwania DNS).
+- Nie zmieniaj nagłówka `Host` w `reverse_proxy` (domyślnie Caddy go przekazuje) — panel porównuje go
+  z nagłówkiem `Origin` i odrzuca zapytania, w których się różnią.
+- Adres panelu na innym porcie niż 8088 (np. `https://192.168.1.10:8443`) też zadziała — wtedy `bind` nie jest
+  potrzebny.
+
+### Dostęp zdalny przez tunel VPN (np. Tailscale)
+
+**Nie wystawiaj panelu ani kontrolera do internetu przekierowaniem portu na routerze.** Do pracy spoza firmy
+użyj tunelu VPN — panel jest wtedy osiągalny tylko dla Twoich urządzeń w tunelu. Najprościej przez
+[Tailscale](https://tailscale.com/) (WireGuard, darmowy plan dla małych zespołów; podobnie działają ZeroTier,
+NetBird, WireGuard albo VPN na routerze):
+
+1. Zainstaluj Tailscale na komputerze z panelem i na urządzeniach, z których chcesz się łączyć (komputer,
+   telefon), i zaloguj je na to samo konto (sieć „tailnet”).
+2. Komputer z panelem dostaje adres `100.x.y.z` i nazwę MagicDNS, np. `panel.twoja-siec.ts.net`.
+3. Udostępnij panel na adresie Tailscale — do wyboru:
+   - **Caddy z certyfikatem Tailscale (publiczny, bez ostrzeżeń w przeglądarce)** — w konsoli administracyjnej
+     Tailscale włącz *MagicDNS* i *HTTPS Certificates*, pozwól Caddy pobierać certyfikaty
+     (`sudo tailscale set --operator=caddy`) i dopisz drugi blok:
+
+     ```caddyfile
+     # Spreest - Panel ACB — zdalnie przez Tailscale
+     https://panel.twoja-siec.ts.net:8088 {
+     	bind 100.x.y.z                       # adres Tailscale komputera z panelem
+     	tls {
+     		get_certificate tailscale
+     	}
+     	reverse_proxy 127.0.0.1:8088
+     }
+     ```
+
+     Panel otwierasz wtedy pod **https://panel.twoja-siec.ts.net:8088** — z sieci firmowej nadal przez blok LAN.
+     Po pierwszym włączeniu certyfikatów wykonaj pełny `sudo systemctl restart caddy` (sam `reload` nie zawsze
+     ponawia pobranie certyfikatu).
+   - **Tailscale Serve (bez Caddy)** — `sudo tailscale serve --bg --https=8088 http://127.0.0.1:8088`; Tailscale sam
+     wystawia certyfikat i przekazuje ruch do panelu (panel też z `ACS_TRUST_PROXY=1`). Tego wariantu nie
+     sprawdzaliśmy — jeśli zapisy w panelu kończą się odmową, Serve zmienia nagłówek `Host`; wtedy użyj Caddy.
+4. W ustawieniach dostępu (ACL) tailnetu ogranicz, kto widzi komputer z panelem — domyślnie każde urządzenie
+   w tailnecie widzi wszystkie pozostałe.
+
+Uwagi:
+
+- Tunel łączy przeglądarkę z **panelem**, nie z kontrolerem. Panel musi działać w sieci lokalnej przy kontrolerze
+  (tryb online, komputer włączony cały czas) — wyszukiwanie kontrolerów (rozgłoszenie UDP) przez tunel nie działa.
+- Nie udostępniaj przez tunel samej podsieci kontrolerów (*subnet router*), jeśli nie musisz — lepiej, żeby
+  z kontrolerem rozmawiał tylko panel.
+- Panel wymaga logowania także przez tunel. Pierwsze konto administratora przez Caddy/Tailscale wymaga kodu
+  z konsoli panelu (przy `ACS_TRUST_PROXY=1` nikt nie jest traktowany jak „ten sam komputer”) — albo ustaw
+  `ACS_ADMIN_LOGIN` / `ACS_ADMIN_PASSWORD`.
+- Powiadomienia przeglądarki w panelu działają tylko po HTTPS — przez tunel z certyfikatem działają.
+
 ## Funkcje
 
 ### Nowe w 2.10.0
@@ -512,7 +613,7 @@ w `.1`). Ścieżkę zmienia `ACS_DEVICE_LOG`.
   nie da się tego włączyć. Szyfrować można tylko odcinek przeglądarka → panel (`ACS_TLS_CERT` albo serwer HTTPS
   przed panelem). Dotyczy to wszystkich modeli: ACB-001, ACB-002 i ACB-004. Zalecana topologia: kontroler
   podłączony bezpośrednio do serwera z panelem albo kontroler i serwer w wydzielonym VLAN-ie na switchu
-  zarządzalnym, a panel udostępniony użytkownikom wyłącznie po HTTPS.
+  zarządzalnym, a panel udostępniony użytkownikom wyłącznie po HTTPS (konfiguracja: „HTTPS i dostęp zdalny”).
 - Panel słuchający w sieci (`ACS_BIND` inny niż 127.0.0.1) bez HTTPS: hasła do panelu idą otwartym tekstem —
   panel ostrzega o tym przy starcie i w „Ustawieniach panelu”.
 - Katalog danych zawiera hasła zapisanych kontrolerów, numery kart, nazwiska i kopie — chroń go.
